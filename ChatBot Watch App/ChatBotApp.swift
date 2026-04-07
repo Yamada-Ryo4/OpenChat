@@ -1,5 +1,6 @@
 import SwiftUI
 import ClockKit
+import WatchConnectivity
 
 @main
 struct ChatBotApp: App {
@@ -7,6 +8,10 @@ struct ChatBotApp: App {
     @StateObject private var viewModel = ChatViewModel()
     
     @Environment(\.scenePhase) private var scenePhase
+    
+    init() {
+        WatchSessionManager.shared.activate()
+    }
 
     var body: some Scene {
         WindowGroup {
@@ -69,16 +74,13 @@ public class ComplicationController: NSObject, CLKComplicationDataSource {
         var headerText = "ChatBot"
         var bodyText = "No messages"
         
-        if let data = UserDefaults.standard.data(forKey: "chatSessions_v1"),
-           let sessions = try? JSONDecoder().decode([ChatSession].self, from: data),
-           let lastSession = sessions.first { // 已经排好序了
-            
-            // 尝试获取最后一条非 System 消息
-            if let lastMsg = lastSession.messages.last(where: { $0.role != .system }) {
-                let prefix = lastMsg.role == .user ? "You: " : "AI: "
-                bodyText = prefix + lastMsg.text
-            } else {
-                bodyText = lastSession.title
+        // 从小体积预备数据中读取，防止解析几十MB JSON 造成 OOM 或 Watchdog 强杀
+        if let tinyData = UserDefaults.standard.dictionary(forKey: "widget_tiny_data") as? [String: String] {
+            if let title = tinyData["title"], title != "ChatBot" && title != "新对话" {
+                headerText = title
+            }
+            if let msg = tinyData["lastMessage"] {
+                bodyText = msg
             }
         }
         

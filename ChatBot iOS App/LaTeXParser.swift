@@ -3,8 +3,7 @@ import SwiftUI
 
 // MARK: - AST Nodes
 enum LatexNode: Identifiable, Hashable {
-    // v2.1: 使用稳定的 hash-based ID，避免每次访问创建新 UUID 导致 SwiftUI 全量重绘。
-    // 注意：hashValue 碰撞概率极低（Int64 范围），配合 ForEach index 不会丢节点。
+    // 使用稳定的 hashValue 作为 ID，避免每次访问生成新 UUID 导致 SwiftUI 全量重绘
     var id: Int { hashValue }
     
     case text(String)

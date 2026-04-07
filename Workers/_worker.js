@@ -1,6 +1,9 @@
 export default {
-    async fetch(request, env) {
-        const AUTH_KEY = "your-secret-key-here";
+    // AUTH_KEY 从 Cloudflare Workers 环境变量读取
+    // 配置方式：Cloudflare Dashboard → Workers → Settings → Variables → 添加 AUTH_KEY
+    async fetch(request, env)
+    {
+        const AUTH_KEY = env.AUTH_KEY ?? "";  // 从环境变量读取，勿在此处硬编码
         const MAX_BACKUPS = 100;
         const cors = {
             'Access-Control-Allow-Origin': '*',

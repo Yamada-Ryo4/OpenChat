@@ -2,10 +2,8 @@ import Foundation
 import CoreLocation
 import Combine
 
-/// 位置服务管理器
-/// 注意：CLLocationManagerDelegate 回调可能在非主线程触发，
-/// 所有 @Published 属性更新已通过 DispatchQueue.main.async 保证线程安全。
-/// 不能标记为 @MainActor，因为 CLLocationManager 的委托不保证在主线程回调。
+/// 注意：此类不能标记为 @MainActor，因为 CLLocationManagerDelegate 的回调可能在非主线程到达。
+/// 所有 UI 更新均通过 DispatchQueue.main.async 确保线程安全。
 class LocationService: NSObject, ObservableObject, CLLocationManagerDelegate {
     static let shared = LocationService()
     

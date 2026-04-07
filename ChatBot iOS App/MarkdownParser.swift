@@ -3,6 +3,11 @@ import SwiftUI
 /// 极简 Markdown 解析器 - 纯文本转换
 struct MarkdownParser {
     
+    // Cached Regex Instances
+    private static let titleRegex = try! NSRegularExpression(pattern: "(\\n|^)(#+\\s)(.*?)(\\n|$)", options: [])
+    private static let quoteRegex = try! NSRegularExpression(pattern: "(\\n|^)(>\\s?)(.*?)(\\n|$)", options: [])
+    private static let summaryRegex = try! NSRegularExpression(pattern: "<summary>(.*)", options: [.caseInsensitive])
+
     static func format(_ text: String) -> String {
         // 核心逻辑：先按 ``` 分割，奇数索引为代码块，偶数索引为普通文本
         // 只有普通文本才进行 Markdown 和 LaTeX 解析
@@ -66,17 +71,10 @@ struct MarkdownParser {
         
         // 标题简化 - 转换为加粗文本，以适应 inlineOnlyPreservingWhitespace 模式
         // 使用正则将 # Title 替换为 **Title**
-        do {
-            // 匹配行首的 # 号 (1-6个)，忽略代码块内的 (虽然这里没法完美区分，但 cleanMarkdown 本身就是简单处理)
-            // 模式：(换行或开头)(#+空格)(内容)(换行或结尾)
-            let pattern = "(\\n|^)(#+\\s)(.*?)(\\n|$)"
-            let regex = try NSRegularExpression(pattern: pattern, options: [])
-            let range = NSRange(location: 0, length: (r as NSString).length)
-            // 替换为：$1**$3**$4
-            r = regex.stringByReplacingMatches(in: r, options: [], range: range, withTemplate: "$1**$3**$4")
-        } catch {
-            print("Regex error: \(error)")
-        }
+        // 使用正则将 # Title 替换为 **Title**
+        let range = NSRange(location: 0, length: (r as NSString).length)
+        // 替换为：$1**$3**$4
+        r = titleRegex.stringByReplacingMatches(in: r, options: [], range: range, withTemplate: "$1**$3**$4")
         
         // 列表符号
         r = r.replacingOccurrences(of: "\n- [ ] ", with: "\n☐ ")
@@ -86,14 +84,9 @@ struct MarkdownParser {
         // 引用块优化：使用竖线符号 + 斜体模拟引用样式
         // r = r.replacingOccurrences(of: "\n> ", with: "\n| ") // 旧逻辑
         do {
-            // 匹配行首的 > (可能带空格)
-            let pattern = "(\\n|^)(>\\s?)(.*?)(\\n|$)"
-            let regex = try NSRegularExpression(pattern: pattern, options: [])
-            let range = NSRange(location: 0, length: (r as NSString).length)
+            let quoteRange = NSRange(location: 0, length: (r as NSString).length)
             // 替换为：$1▍ $3$4 (使用更粗的竖线 + 空格，不使用斜体以保持清晰)
-            r = regex.stringByReplacingMatches(in: r, options: [], range: range, withTemplate: "$1▍ $3$4")
-        } catch {
-            print("Regex error (quote): \(error)")
+            r = quoteRegex.stringByReplacingMatches(in: r, options: [], range: quoteRange, withTemplate: "$1▍ $3$4")
         }
         
         // 分割线：转换为文本型分割线，避免 AttributedString 解析为 Block 导致排版混乱
@@ -112,14 +105,9 @@ struct MarkdownParser {
         r = r.replacingOccurrences(of: "</summary>", with: "\n", options: .caseInsensitive)
         
         // <summary>文本</summary> -> ▼ 文本
-        do {
-            let pattern = "<summary>(.*)"
-            let regex = try NSRegularExpression(pattern: pattern, options: [.caseInsensitive])
-            let range = NSRange(location: 0, length: (r as NSString).length)
-            r = regex.stringByReplacingMatches(in: r, options: [], range: range, withTemplate: "▼ $1")
-        } catch {
-            print("Regex error (summary): \(error)")
-        }
+        // <summary>文本</summary> -> ▼ 文本
+        let summaryRange = NSRange(location: 0, length: (r as NSString).length)
+        r = summaryRegex.stringByReplacingMatches(in: r, options: [], range: summaryRange, withTemplate: "▼ $1")
         
         return r
     }

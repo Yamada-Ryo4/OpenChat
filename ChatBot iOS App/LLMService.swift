@@ -58,19 +58,33 @@ class LLMService: NSObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["text": text])
+        // v2.5: 同时发送 input(OpenAI 格式) 和 text(旧格式)，兼容两种 Worker
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["input": text, "text": text])
         
+        logNetworkTrace(request: request)
         let (data, _) = try await session.data(for: request)
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let dataArr = json["data"] as? [[Double]],
-              let first = dataArr.first else {
-            if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-               let error = json["error"] as? String {
-                throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: error])
-            }
+        logNetworkTrace(request: request, responseData: data)
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法解析 Workers AI 响应"])
         }
-        return first.map { Float($0) }
+        
+        // v2.5: 优先解析 OpenAI 格式 {"data": [{"embedding": [...]}]}
+        if let dataArr = json["data"] as? [[String: Any]],
+           let first = dataArr.first,
+           let embedding = first["embedding"] as? [Double] {
+            return embedding.map { Float($0) }
+        }
+        
+        // 兼容旧格式 {"data": [[...]]}
+        if let dataArr = json["data"] as? [[Double]],
+           let first = dataArr.first {
+            return first.map { Float($0) }
+        }
+        
+        if let error = json["error"] as? String {
+            throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: error])
+        }
+        throw NSError(domain: "Embedding", code: -1, userInfo: [NSLocalizedDescriptionKey: "无法解析 Workers AI 响应"])
     }
     
     private func fetchOpenAIEmbedding(text: String, modelId: String, baseURL: String, apiKey: String, dimensions: Int? = nil) async throws -> [Float] {
@@ -83,7 +97,9 @@ class LLMService: NSObject {
         if let dim = dimensions { body["dimensions"] = dim }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
+        logNetworkTrace(request: request)
         let (data, _) = try await session.data(for: request)
+        logNetworkTrace(request: request, responseData: data)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let dataArr = json["data"] as? [[String: Any]],
               let first = dataArr.first,
@@ -113,7 +129,9 @@ class LLMService: NSObject {
         if let dim = dimensions { body["outputDimensionality"] = dim }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         
+        logNetworkTrace(request: request)
         let (data, _) = try await session.data(for: request)
+        logNetworkTrace(request: request, responseData: data)
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let embeddingObj = json["embedding"] as? [String: Any],
               let values = embeddingObj["values"] as? [Double] else {
@@ -132,7 +150,9 @@ class LLMService: NSObject {
         guard let request = buildRequest(baseURL: baseURL, path: "models", apiKey: apiKey, type: .openAI) else { throw URLError(.badURL) }
         
         // 使用 legacyData 
+        logNetworkTrace(request: request)
         let (data, response) = try await legacyData(for: request)
+        logNetworkTrace(request: request, responseData: data)
         try validateResponse(response, data: data)
         // 使用文件底部的私有结构体解析
         let list = try JSONDecoder().decode(PrivateOpenAIModelListResponse.self, from: data)
@@ -141,7 +161,9 @@ class LLMService: NSObject {
     
     private func fetchGeminiModels(baseURL: String, apiKey: String) async throws -> [AIModelInfo] {
         guard let request = buildRequest(baseURL: baseURL, path: "models", apiKey: apiKey, type: .gemini) else { throw URLError(.badURL) }
+        logNetworkTrace(request: request)
         let (data, response) = try await legacyData(for: request)
+        logNetworkTrace(request: request, responseData: data)
         try validateResponse(response, data: data)
         let list = try JSONDecoder().decode(PrivateGeminiModelListResponse.self, from: data)
         return list.models.map { m in
@@ -150,12 +172,54 @@ class LLMService: NSObject {
         }.filter { $0.id.contains("gemini") }.sorted { $0.id < $1.id }
     }
     
+    // MARK: - Web Search Integration
+    func fetchWebSearchResults(query: String, workerURL: String, authKey: String? = nil) async throws -> String {
+        guard let url = URL(string: workerURL) else {
+            throw URLError(.badURL)
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        // v2.5: 搜索鉴权
+        if let key = authKey, !key.isEmpty {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
+        }
+        
+        let body: [String: Any] = ["query": query]
+        request.httpBody = try JSONSerialization.data(withJSONObject: body)
+        
+        logNetworkTrace(request: request)
+        let (data, response) = try await session.data(for: request)
+        logNetworkTrace(request: request, responseData: data)
+        guard let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode == 200 else {
+            let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            let errorText = String(data: data, encoding: .utf8) ?? "Unknown error"
+            throw NSError(domain: "WebSearch", code: statusCode, userInfo: [NSLocalizedDescriptionKey: "Search proxy failed (\(statusCode)): \(errorText)"])
+        }
+        
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let results = json["results"] as? [[String: Any]], !results.isEmpty else {
+            return "No relevant search results found."
+        }
+        
+        var contextString = "Here are the web search results for the user's query:\n"
+        for (index, item) in results.enumerated() {
+            let title = item["title"] as? String ?? "No Title"
+            let snippet = item["snippet"] as? String ?? ""
+            let link = item["link"] as? String ?? ""
+            contextString += "[\(index + 1)] \(title)\n\(snippet)\nURL: \(link)\n\n"
+        }
+        return contextString.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+    
     private func streamOpenAIChat(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String, temperature: Double, disableReasoning: Bool) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             let task = Task {
                 var isReasoning = false // v1.13: 记录 OpenAI 兼容流中是否处于推理阶段
-                var hadReasoning = false  // 一旦模型用过 reasoning_content 字段，标记此 flag
+                var hadReasoning = false  // 一旦模型用过 reasoning_content 字段，标记此 flag;
+                                         // 后续 content 中所有的 <think>/</think> 也应该被转义（是模型演示文本，不是结构指令）
                 var tagBuffer = "" // 用于防切包（Split Chunk）的安全缓冲
+
                 
                 let openAIMessages: [[String: Any]] = messages.map { msg in
                     var content: Any = msg.text
@@ -179,8 +243,7 @@ class LLMService: NSObject {
                         return nil
                     }
                     let json = String(line.dropFirst(6))
-                    let trimmedJson = json.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if trimmedJson == "[DONE]" { 
+                    if json.trimmingCharacters(in: .whitespaces) == "[DONE]" { 
                         let final = tagBuffer
                         tagBuffer = ""
                         return final.isEmpty ? nil : final
@@ -191,7 +254,6 @@ class LLMService: NSObject {
                         let delta = res.choices.first?.delta
                         var result = ""
                         
-                        // v1.13+: 完美包裹 reasoning_content
                         // v3.2: 完美包裹 reasoning_content
                         // 关键修复：直接提取官方原生 API 的 reasoning_content 和 content 独立处理
                         if !disableReasoning, let reasoning = delta?.reasoning_content, !reasoning.isEmpty {
@@ -250,12 +312,18 @@ class LLMService: NSObject {
     private func streamGeminiChat(messages: [ChatMessage], modelId: String, baseURL: String, apiKey: String, temperature: Double) -> AsyncThrowingStream<String, Error> {
         return AsyncThrowingStream { continuation in
             let task = Task {
-                let contents: [[String: Any]] = messages.map { msg in
+                var contents: [[String: Any]] = []
+                var systemText = ""
+                for msg in messages {
+                    if msg.role == .system {
+                        systemText += msg.text + "\n"
+                        continue
+                    }
                     var parts: [[String: Any]] = []
                     if let imgData = msg.imageData { parts.append(["inline_data": ["mime_type": "image/jpeg", "data": imgData.base64EncodedString()]]) }
                     if !msg.text.isEmpty { parts.append(["text": msg.text]) }
                     let role = (msg.role == .user) ? "user" : "model"
-                    return ["role": role, "parts": parts]
+                    contents.append(["role": role, "parts": parts])
                 }
                 let generationConfig: [String: Any] = ["temperature": temperature]
                 
@@ -267,11 +335,15 @@ class LLMService: NSObject {
                     ["category": "HARM_CATEGORY_DANGEROUS_CONTENT", "threshold": "BLOCK_NONE"]
                 ]
                 
-                let body: [String: Any] = [
+                var body: [String: Any] = [
                     "contents": contents,
                     "generationConfig": generationConfig,
                     "safetySettings": safetySettings
                 ]
+                let cleanSys = systemText.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !cleanSys.isEmpty {
+                    body["systemInstruction"] = ["parts": [["text": cleanSys]]]
+                }
                 let path = "models/\(modelId):streamGenerateContent?alt=sse"
                 
                 guard var req = buildRequest(baseURL: baseURL, path: path, apiKey: apiKey, type: .gemini) else { continuation.finish(throwing: URLError(.badURL)); return }
@@ -395,8 +467,8 @@ class LLMService: NSObject {
                             }
                             // 处理思考内容 (如果有)
                             if eventType == "response.reasoning.delta" {
-                                if !disableReasoning, let delta = dict["delta"] as? String { return "🧠THINK:" + delta }
-                                else { return nil }
+                                if disableReasoning { return nil }
+                                if let delta = dict["delta"] as? String { return "🧠THINK:" + delta }
                             }
                         }
                         
@@ -470,9 +542,6 @@ class LLMService: NSObject {
                         // 处理 event: 行（Anthropic SSE 格式）
                         if line.hasPrefix("event: ") { return nil }
                         let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
-                        // Ignore common Anthropic start/stop events without warnings
-                        if trimmed == "event: message_start" || trimmed == "event: message_delta" || trimmed == "event: ping" { return nil }
-                        
                         if !trimmed.isEmpty && trimmed != "" {
                             print("⚠️ Anthropic 非标准行: \(line.prefix(200))")
                         }
@@ -582,18 +651,36 @@ class LLMService: NSObject {
         }
     }
 
+    // MARK: - Network Trace Logger
+    private func logNetworkTrace(request: URLRequest, responseData: Data? = nil, rawString: String? = nil, isStreamEnd: Bool = false) {
+        if responseData == nil && rawString == nil {
+            print("\n🌐 [API 请求] \(request.httpMethod ?? "GET") \(request.url?.absoluteString ?? "")")
+            var safeHeaders = request.allHTTPHeaderFields ?? [:]
+            for (k, v) in safeHeaders {
+                if k.lowercased() == "authorization" || k.lowercased() == "x-api-key" {
+                    safeHeaders[k] = v.prefix(15) + "...(hidden)" // 脱敏
+                }
+            }
+            if !safeHeaders.isEmpty { print("Headers: \(safeHeaders)") }
+            if let body = request.httpBody, let bodyStr = String(data: body, encoding: .utf8) {
+                print("Body JSON: \(bodyStr)")
+            }
+            print("--------------------\n")
+        } else if let raw = rawString, isStreamEnd {
+            print("\n📦 [API 完整原始流响应 (Raw SSE)]\n\(raw)\n--------------------\n")
+        } else if let data = responseData, let jsonStr = String(data: data, encoding: .utf8) {
+            print("\n📦 [API 完整原始响应 (JSON)]\n\(jsonStr)\n--------------------\n")
+        }
+    }
+
     private func performStream(request: URLRequest, continuation: AsyncThrowingStream<String, Error>.Continuation, parser: @escaping (String) -> String?) async {
+        logNetworkTrace(request: request)
+        
         // 使用 cachePolicy 忽略缓存，强制发起网络请求
         var newReq = request
         newReq.cachePolicy = .reloadIgnoringLocalAndRemoteCacheData
         
         do {
-            // 目前 async/await 的 bytes(for:) 方法在某些 watchOS 版本上可能不会正确触发 URLSessionTaskDelegate
-            // 导致 TLS 验证无法跳过。
-            // 虽然 legacyData 可以保证触发，但它不支持流式。
-            // 考虑到项目必须支持流式输出，我们会先尝试用 bytes(for:)。
-            // 如果仍然有问题，请确保 Info.plist 的 ATS Exceptions 设置正确。
-            
             let (result, response) = try await session.bytes(for: newReq)
             
             if let httpResponse = response as? HTTPURLResponse, httpResponse.statusCode != 200 {
@@ -604,7 +691,6 @@ class LLMService: NSObject {
                 let code = httpResponse.statusCode
                 let summary = errorBody.prefix(300).trimmingCharacters(in: .whitespacesAndNewlines)
                 let message = summary.isEmpty ? "HTTP \(code) Error" : "HTTP \(code): \(summary)"
-                continuation.yield("❌ \(message)")
                 continuation.finish(throwing: NSError(domain: "LLMService", code: code, userInfo: [NSLocalizedDescriptionKey: message]))
                 return
             }

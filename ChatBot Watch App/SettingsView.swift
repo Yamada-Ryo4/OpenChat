@@ -1,52 +1,64 @@
 import SwiftUI
 
+// MARK: - watchOS 安全输入框
+/// 使用 TextField 替代 SecureField（后者在 watchOS 后台恢复时会闪退）。
+/// 通过 overlay 掩码实现安全显示，眼睛按钮切换明文/掩码。
+struct PasteableSecureField: View {
+    let placeholder: String
+    @Binding var text: String
+    @State private var isRevealed = false
+
+    var body: some View {
+        HStack {
+            Group {
+                if isRevealed || text.isEmpty {
+                    TextField(placeholder, text: $text)
+                } else {
+                    TextField(placeholder, text: $text)
+                        .foregroundColor(.clear)
+                        .overlay(alignment: .leading) {
+                            Text(maskedText)
+                                .foregroundColor(.primary)
+                                .allowsHitTesting(false)
+                        }
+                }
+            }
+            .textInputAutocapitalization(.never)
+            .disableAutocorrection(true)
+
+            if !text.isEmpty {
+                Button { isRevealed.toggle() } label: {
+                    Image(systemName: isRevealed ? "eye" : "eye.slash")
+                        .font(.caption2)
+                        .foregroundColor(.secondary)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    private var maskedText: String {
+        guard !text.isEmpty else { return "" }
+        guard text.count > 6 else { return String(repeating: "•", count: text.count) }
+        let prefix = String(text.prefix(3))
+        let middle = String(repeating: "•", count: min(8, text.count - 6))
+        let suffix = String(text.suffix(3))
+        return prefix + middle + suffix
+    }
+}
+
 struct SettingsView: View {
     @ObservedObject var viewModel: ChatViewModel
+    @ObservedObject private var watchManager = WatchSessionManager.shared
     
     // MARK: - 新增状态变量，用于处理删除确认
     @State private var showDeleteAlert = false
     @State private var pendingDeleteIndexSet: IndexSet?
     
-    // 批量验证状态
-    @State private var isValidating = false
-    @State private var validationResult: String? = nil
-    
     // v1.7: 从选中的 Embedding 供应商的模型列表中过滤 embedding 模型
     @State private var showAddProviderSheet = false // v1.7.2: 使用 Sheet 修复输入问题
     @State private var showImportSheet = false // v1.8: 导入配置
     @State private var importResult: String? = nil
-    
-    // v1.9: 文件导出状态
-    @State private var exportedConfigURL: URL? = nil
-    @State private var exportedMemoriesURL: URL? = nil
-    @State private var exportedSessionsURL: URL? = nil
-    
-    var embeddingModelsForSelectedProvider: [AIModelInfo] {
-        guard !viewModel.embeddingProviderID.isEmpty,
-              let providerUUID = UUID(uuidString: viewModel.embeddingProviderID),
-              let provider = viewModel.providers.first(where: { $0.id == providerUUID }) else {
-            return []
-        }
-        return provider.availableModels.filter {
-            $0.id.localizedCaseInsensitiveContains("embed")
-        }.sorted { $0.id < $1.id }
-    }
-    
-    // v1.7: 辅助模型显示名称
-    var helperDisplayModelName: String {
-        if viewModel.helperGlobalModelID.isEmpty { return "跟随当前模型" }
-        let components = viewModel.helperGlobalModelID.split(separator: "|")
-        if components.count == 2 {
-            if let found = viewModel.allFavoriteModels.first(where: { $0.id == viewModel.helperGlobalModelID }) {
-                // 如果显示名称包含路径（如 model/gpt-4），只显示最后一段
-                let parts = found.displayName.split(separator: "/")
-                if parts.count >= 2 { return String(parts.last!).trimmingCharacters(in: .whitespaces) }
-                return found.displayName
-            }
-            return String(components[1])
-        }
-        return "跟随当前模型"
-    }
     
     var body: some View {
         List {
@@ -108,165 +120,35 @@ struct SettingsView: View {
                 }
             }
             
-            Section(header: Text("界面设置")) {
-                Toggle("显示模型名称", isOn: $viewModel.showModelNameInNavBar)
-                Toggle("显示回底部按钮", isOn: $viewModel.showScrollToBottomButton)
-                Toggle("启用振动反馈", isOn: $viewModel.enableHapticFeedback)
-                Toggle("消息气泡动画", isOn: $viewModel.enableMessageAnimation)
-                Picker("对话历史上下文", selection: $viewModel.historyMessageCount) {
-                    ForEach(Array(stride(from: 5, through: 50, by: 5)), id: \.self) { count in
-                        Text("\(count)条").tag(count)
-                    }
-                }
-                
-                // v1.6: 主题选择
-                Picker("主题配色", selection: $viewModel.currentTheme) {
-                    ForEach(AppTheme.allCases) { theme in
-                        HStack(spacing: 6) {
-                            Circle().fill(theme.userBubbleColor).frame(width: 10, height: 10)
-                            Circle().fill(theme.botBubbleColor).frame(width: 10, height: 10)
-                            Text(theme.rawValue)
-                        }
-                        .tag(theme)
-                    }
-                }
-            }
-            
-            
-            Section(header: Text("文本渲染")) {
-                Picker("Markdown 渲染模式", selection: $viewModel.markdownRenderMode) {
-                    ForEach(MarkdownRenderMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
-                }
-                
-                switch viewModel.markdownRenderMode {
-                case .realtime:
-                    Text("流式时实时渲染，可能影响性能")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                case .onComplete:
-                    Text("完成后自动渲染，流畅且自动格式化")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                case .manual:
-                    Text("流式显示纯文本，点击按钮手动渲染")
-                        .font(.caption2)
-                        .foregroundColor(.secondary)
-                }
-                
-                Toggle("启用 LaTeX 渲染", isOn: $viewModel.latexRenderingEnabled)
-                
-                if viewModel.latexRenderingEnabled {
-                    Toggle("高级渲染模式", isOn: $viewModel.advancedLatexEnabled)
-                    
-                    if viewModel.advancedLatexEnabled {
-                        Text("⚠️ 高级模式可能导致排版错误和渲染问题")
-                            .font(.caption2)
-                            .foregroundColor(.orange)
-                    }
-                }
-            }
-            
-            Section(header: Text("模型参数")) {
-                Picker("温度参数", selection: $viewModel.temperature) {
-                    ForEach(0...20, id: \.self) { i in
-                        let val = Double(i) / 10.0
-                        Text(String(format: "%.1f", val)).tag(val)
-                    }
+            // MARK: 子菜单导航
+            Section {
+                NavigationLink {
+                    WatchAppearanceSettingsView(viewModel: viewModel)
+                } label: {
+                    Label("界面与显示", systemImage: "paintbrush")
                 }
                 
                 NavigationLink {
-                    SystemPromptEditView(prompt: $viewModel.customSystemPrompt)
+                    WatchModelDialogSettingsView(viewModel: viewModel)
                 } label: {
-                    HStack {
-                        Text("系统提示词")
-                        Spacer()
-                        Text(viewModel.customSystemPrompt.isEmpty ? "未设置" : "已设置")
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                    }
-                }
-            }
-            
-            Section(header: Text("高级")) {
-                // 思考模式
-                Picker("思考模式", selection: $viewModel.thinkingMode) {
-                    ForEach(ThinkingMode.allCases) { mode in
-                        Text(mode.rawValue).tag(mode)
-                    }
+                    Label("模型与对话", systemImage: "slider.horizontal.3")
                 }
                 
-
-                // v1.11: 记忆与向量
                 NavigationLink {
                     MemorySettingsView(viewModel: viewModel)
                 } label: {
                     HStack {
-                        Text("记忆与向量")
+                        Label("记忆与向量", systemImage: "brain.head.profile")
                         Spacer()
-                        if viewModel.memoryEnabled {
-                            Text("已启用")
-                                .font(.caption).foregroundColor(.secondary)
-                        } else {
-                            Text("已禁用")
-                                .font(.caption).foregroundColor(.secondary)
-                        }
+                        Text(viewModel.memoryEnabled ? "已启用" : "已禁用")
+                            .font(.caption).foregroundColor(.secondary)
                     }
                 }
                 
-                // v1.7: 辅助模型（标题生成等）
                 NavigationLink {
-                    HelperModelSelectionView(viewModel: viewModel)
+                    WatchAdvancedSyncSettingsView(viewModel: viewModel, watchManager: watchManager)
                 } label: {
-                    HStack {
-                        Text("辅助模型")
-                        Spacer()
-                        Text(helperDisplayModelName)
-                            .font(.caption)
-                            .foregroundColor(.secondary)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
-                    }
-                }
-                
-                // 批量验证按钮
-                Button {
-                    isValidating = true
-                    Task {
-                        let result = await viewModel.validateAllProviders()
-                        await MainActor.run {
-                            isValidating = false
-                            validationResult = "✅ \(result.success) 成功, ❌ \(result.failed) 失败"
-                        }
-                    }
-                } label: {
-                    HStack {
-                        Image(systemName: "checkmark.shield")
-                        Text("批量验证供应商")
-                        Spacer()
-                        if isValidating {
-                            ProgressView()
-                        } else if let result = validationResult {
-                            Text(result).font(.caption).foregroundColor(.secondary)
-                        }
-                    }
-                }
-                .disabled(isValidating)
-                
-                // v1.10: 云端数据管理
-                NavigationLink {
-                    CloudDataView(viewModel: viewModel)
-                } label: {
-                    Label("云端数据管理", systemImage: "icloud")
-                }
-                
-                // v1.8: 迁移进度
-                if let progress = viewModel.migrationProgress {
-                    HStack {
-                        ProgressView()
-                        Text(progress).font(.caption).foregroundColor(.secondary)
-                    }
+                    Label("高级与同步", systemImage: "gearshape.2")
                 }
             }
             
@@ -317,6 +199,196 @@ struct SettingsView: View {
     }
 }
 
+// MARK: - 界面与显示子页面 (watchOS)
+struct WatchAppearanceSettingsView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    
+    var body: some View {
+        List {
+            Section(header: Text("界面设置")) {
+                Toggle("显示模型名称", isOn: $viewModel.showModelNameInNavBar)
+                Toggle("显示回底部按钮", isOn: $viewModel.showScrollToBottomButton)
+                Toggle("启用振动反馈", isOn: $viewModel.enableHapticFeedback)
+                Toggle("消息气泡动画", isOn: $viewModel.enableMessageAnimation)
+                Picker("主题配色", selection: $viewModel.currentTheme) {
+                    ForEach(AppTheme.allCases) { theme in
+                        HStack(spacing: 6) {
+                            Circle().fill(theme.userBubbleColor).frame(width: 10, height: 10)
+                            Circle().fill(theme.botBubbleColor).frame(width: 10, height: 10)
+                            Text(theme.rawValue)
+                        }.tag(theme)
+                    }
+                }
+            }
+            
+            Section(header: Text("文本渲染")) {
+                Picker("Markdown 渲染", selection: $viewModel.markdownRenderMode) {
+                    ForEach(MarkdownRenderMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                }
+                switch viewModel.markdownRenderMode {
+                case .realtime: Text("流式时实时渲染").font(.caption2).foregroundColor(.secondary)
+                case .onComplete: Text("完成后自动渲染").font(.caption2).foregroundColor(.secondary)
+                case .manual: Text("手动点击渲染").font(.caption2).foregroundColor(.secondary)
+                }
+                Toggle("LaTeX 渲染", isOn: $viewModel.latexRenderingEnabled)
+                if viewModel.latexRenderingEnabled {
+                    Toggle("高级渲染模式", isOn: $viewModel.advancedLatexEnabled)
+                    if viewModel.advancedLatexEnabled {
+                        Text("⚠️ 可能导致排版错误").font(.caption2).foregroundColor(.orange)
+                    }
+                }
+            }
+        }
+        .navigationTitle("界面与显示")
+    }
+}
+
+// MARK: - 模型与对话子页面 (watchOS)
+struct WatchModelDialogSettingsView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    
+    var helperDisplayModelName: String {
+        if viewModel.helperGlobalModelID.isEmpty { return "跟随当前模型" }
+        let components = viewModel.helperGlobalModelID.split(separator: "|")
+        if components.count == 2 {
+            if let found = viewModel.allFavoriteModels.first(where: { $0.id == viewModel.helperGlobalModelID }) {
+                let parts = found.displayName.split(separator: "/")
+                if parts.count >= 2, let last = parts.last { return String(last).trimmingCharacters(in: .whitespaces) }
+                return found.displayName
+            }
+            return String(components[1])
+        }
+        return "跟随当前模型"
+    }
+    
+    var body: some View {
+        List {
+            Section(header: Text("模型参数")) {
+                Picker("温度参数", selection: $viewModel.temperature) {
+                    ForEach(0...20, id: \.self) { i in
+                        let val = Double(i) / 10.0
+                        Text(String(format: "%.1f", val)).tag(val)
+                    }
+                }
+                Picker("对话历史上下文", selection: $viewModel.historyMessageCount) {
+                    ForEach(Array(stride(from: 5, through: 50, by: 5)), id: \.self) { count in
+                        Text("\(count)条").tag(count)
+                    }
+                }
+                Picker("思考模式", selection: $viewModel.thinkingMode) {
+                    ForEach(ThinkingMode.allCases) { mode in Text(mode.rawValue).tag(mode) }
+                }
+                NavigationLink {
+                    SystemPromptEditView(prompt: $viewModel.customSystemPrompt)
+                } label: {
+                    HStack {
+                        Text("系统提示词"); Spacer()
+                        Text(viewModel.customSystemPrompt.isEmpty ? "未设置" : "已设置")
+                            .font(.caption).foregroundColor(.secondary)
+                    }
+                }
+            }
+            
+            Section(header: Text("上下文信息")) {
+                Toggle("向 AI 传递时间", isOn: $viewModel.sendTimeToAI)
+                Toggle("向 AI 传递位置", isOn: $viewModel.sendLocationToAI)
+            }
+            
+            Section(header: Text("辅助功能")) {
+                NavigationLink {
+                    HelperModelSelectionView(viewModel: viewModel)
+                } label: {
+                    HStack {
+                        Text("辅助模型"); Spacer()
+                        Text(helperDisplayModelName)
+                            .font(.caption).foregroundColor(.secondary)
+                            .lineLimit(1).truncationMode(.tail)
+                    }
+                }
+            }
+        }
+        .navigationTitle("模型与对话")
+    }
+}
+
+// MARK: - 高级与同步子页面 (watchOS)
+struct WatchAdvancedSyncSettingsView: View {
+    @ObservedObject var viewModel: ChatViewModel
+    @ObservedObject var watchManager: WatchSessionManager
+    @State private var isValidating = false
+    @State private var validationResult: String? = nil
+    
+    var body: some View {
+        List {
+            Section(header: Text("诊断")) {
+                Button {
+                    isValidating = true
+                    Task {
+                        let result = await viewModel.validateAllProviders()
+                        await MainActor.run {
+                            isValidating = false
+                            validationResult = "✅ \(result.success), ❌ \(result.failed)"
+                        }
+                    }
+                } label: {
+                    HStack {
+                        Image(systemName: "checkmark.shield")
+                        Text("批量验证供应商"); Spacer()
+                        if isValidating { ProgressView() }
+                        else if let r = validationResult { Text(r).font(.caption2).foregroundColor(.secondary) }
+                    }
+                }.disabled(isValidating)
+                if let progress = viewModel.migrationProgress {
+                    HStack { ProgressView(); Text(progress).font(.caption).foregroundColor(.secondary) }
+                }
+            }
+            
+            Section(header: Text("云端数据")) {
+                NavigationLink {
+                    CloudDataView(viewModel: viewModel)
+                } label: {
+                    Label("云端数据管理", systemImage: "icloud")
+                }
+            }
+            
+            Section(header: Text("iPhone 同步")) {
+                Button {
+                    watchManager.isSyncing = true
+                    watchManager.lastReceiveStatus = "⏳ 正在推送..."
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+                        self.watchManager.pushConfigToPhone(force: true)
+                        self.watchManager.pushFullDataToPhone(force: true)
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                            self.watchManager.isSyncing = false
+                            if self.watchManager.lastReceiveStatus?.contains("❌") != true {
+                                self.watchManager.lastReceiveStatus = "✅ 已推送 (\(DateFormatter.localizedString(from: Date(), dateStyle: .none, timeStyle: .medium)))"
+                            }
+                        }
+                    }
+                } label: {
+                    HStack {
+                        if watchManager.isSyncing { ProgressView() }
+                        else { Image(systemName: "arrow.clockwise").foregroundColor(.blue) }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(watchManager.isSyncing ? "同步中..." : "同步到 iPhone")
+                            Text("配置+聊天+记忆").font(.caption2).foregroundColor(.secondary)
+                        }
+                    }
+                }.disabled(watchManager.isSyncing)
+                if let status = watchManager.lastReceiveStatus {
+                    HStack(spacing: 4) {
+                        if status.contains("✅") { Image(systemName: "checkmark.circle.fill").foregroundColor(.green).font(.caption2) }
+                        else if status.contains("❌") { Image(systemName: "xmark.circle.fill").foregroundColor(.red).font(.caption2) }
+                        else if status.contains("⏳") { Image(systemName: "arrow.triangle.2.circlepath").foregroundColor(.blue).font(.caption2) }
+                        Text(status).font(.caption2).foregroundColor(.secondary)
+                    }
+                }
+            }
+        }
+        .navigationTitle("高级与同步")
+    }
+}
+
 // 下面的代码保持不变，为了完整性保留引用
 
 // 详情页
@@ -334,130 +406,14 @@ struct ProviderDetailView: View {
     // v1.7: 用于配置能力的模型
     @State private var modelToConfigure: AIModelInfo?
     @State private var showAddKeySheet = false // v1.7.2: 使用 Sheet 修复输入问题
+    @State private var editingKeyIndex: Int? = nil // 正在编辑的 Key 索引
     
     var body: some View {
         Form {
-            Section(header: Text("连接信息")) {
-                TextField("名称", text: $draftConfig.name)
-                Picker("类型", selection: $draftConfig.apiType) { ForEach(APIType.allCases) { type in Text(type.rawValue).tag(type) } }
-                VStack(alignment: .leading) {
-                    Text("Base URL").font(.caption).foregroundColor(.gray)
-                    TextField("https://...", text: $draftConfig.baseURL).textInputAutocapitalization(.never).disableAutocorrection(true)
-                }
-            }
-            
-            Section(header: Text("API Keys (\(draftConfig.apiKeys.count)个)")) {
-                ForEach(Array(draftConfig.apiKeys.enumerated()), id: \.offset) { index, key in
-                    HStack {
-                        VStack(alignment: .leading) {
-                            Text("Key \(index + 1)\(index == draftConfig.currentKeyIndex ? " ✓" : "")")
-                                .font(.caption2)
-                                .foregroundColor(index == draftConfig.currentKeyIndex ? .green : .gray)
-                            Text(maskAPIKey(key))
-                                .font(.caption)
-                                .foregroundColor(.secondary)
-                        }
-                        Spacer()
-                        if draftConfig.apiKeys.count > 1 {
-                            Button(role: .destructive) {
-                                draftConfig.apiKeys.remove(at: index)
-                                if draftConfig.currentKeyIndex >= draftConfig.apiKeys.count {
-                                    draftConfig.currentKeyIndex = max(0, draftConfig.apiKeys.count - 1)
-                                }
-                            } label: {
-                                Image(systemName: "trash").foregroundColor(.red)
-                            }
-                            .buttonStyle(.plain)
-                        }
-                    }
-                }
-                Button {
-                    showAddKeySheet = true
-                } label: {
-                    Label("添加新 Key", systemImage: "plus.circle").foregroundColor(.blue)
-                }
-            }
-            
-            Section(header: Text("模型管理")) {
-                NavigationLink {
-                    // 注意：这里传递的是 config.id 还是 draftConfig.id 由逻辑决定，通常 id 不变
-                    AddCustomModelView(viewModel: viewModel, providerID: draftConfig.id)
-                } label: {
-                    Label("手动添加自定义模型", systemImage: "plus.square.dashed").foregroundColor(.blue)
-                }
-                
-                if draftConfig.apiKey.isEmpty {
-                    Text("请先填写 API Key").font(.caption).foregroundColor(.gray)
-                } else {
-                    Button { validateAndFetch() } label: {
-                        HStack {
-                            Text(isFetching ? "正在获取..." : "获取在线模型列表")
-                            if draftConfig.isValidated && !isFetching { Image(systemName: "checkmark.circle.fill").foregroundColor(.green) }
-                        }
-                    }
-                    .disabled(isFetching)
-                    if let err = fetchError { Text(err).font(.caption2).foregroundColor(.red) }
-                }
-            }
-            
-            if !fetchedOnlineModels.isEmpty || !draftConfig.availableModels.isEmpty {
-                Section(header: Text("可用模型")) {
-                    // 搜索框
-                    TextField("搜索模型...", text: $modelSearchText)
-                        .textInputAutocapitalization(.never)
-                    
-                    // 排序逻辑：收藏的排在前面，然后按 ID 排序
-                    let displayModels = mergeModels().filter { model in
-                        modelSearchText.isEmpty ||
-                        model.id.localizedCaseInsensitiveContains(modelSearchText) ||
-                        (model.displayName?.localizedCaseInsensitiveContains(modelSearchText) ?? false)
-                    }.sorted { m1, m2 in
-                        let isFav1 = draftConfig.isModelFavorited(m1.id)
-                        let isFav2 = draftConfig.isModelFavorited(m2.id)
-                        if isFav1 != isFav2 { return isFav1 } // 收藏优先
-                        return m1.id < m2.id
-                    }
-                    
-                    ForEach(displayModels) { model in
-                        // 构建组合 ID 用于检查设置
-                        let compositeID = "\(draftConfig.id.uuidString)|\(model.id)"
-                        let settings = viewModel.modelSettings[compositeID] ?? ModelSettings()
-                        
-                        Button { toggleDraftModelFavorite(model: model) } label: {
-                            HStack {
-                                VStack(alignment: .leading) {
-                                    HStack {
-                                        Text(model.id).font(.caption)
-                                        // 显示能力状态图标
-                                        if viewModel.checkThinkingSupport(modelId: compositeID) == .supported {
-                                            Image(systemName: "lightbulb.fill")
-                                                .font(.system(size: 10))
-                                                .foregroundColor(.yellow)
-                                        }
-                                        if viewModel.checkVisionSupport(modelId: compositeID) == .supported {
-                                            Image(systemName: "eye.fill")
-                                                .font(.system(size: 10))
-                                                .foregroundColor(.green)
-                                        }
-                                    }
-                                    if let display = model.displayName { Text(display).font(.caption2).foregroundColor(.blue) }
-                                }
-                                Spacer()
-                                if draftConfig.isModelFavorited(model.id) { Image(systemName: "star.fill").foregroundColor(.yellow) }
-                                else { Image(systemName: "star").foregroundColor(.gray) }
-                            }
-                        }
-                        .swipeActions(edge: .trailing) { // 左滑
-                            Button {
-                                self.modelToConfigure = model
-                            } label: {
-                                Label("能力配置", systemImage: "slider.horizontal.3")
-                            }
-                            .tint(.orange)
-                        }
-                    }
-                }
-            }
+            connectionSection
+            apiKeysSection
+            modelManagementSection
+            availableModelsSection
         }
         // 使用 config.name (静态) 而不是 draftConfig.name (动态)，防止输入时 View 刷新导致键盘断连
         .navigationTitle(config.name.isEmpty ? "供应商配置" : config.name)
@@ -465,9 +421,18 @@ struct ProviderDetailView: View {
             self.draftConfig = config
         }
         .onDisappear {
-            // 退出页面时将修改同步回 ViewModel
-            self.config = draftConfig
-            viewModel.saveProviders()
+            // 合并 viewModel 中可能已通过子页面直接添加的自定义模型，防止被旧快照覆盖
+            if let latestFromVM = viewModel.providers.first(where: { $0.id == draftConfig.id }) {
+                for model in latestFromVM.availableModels where model.isCustom == true {
+                    if !draftConfig.availableModels.contains(where: { $0.id == model.id }) {
+                        draftConfig.availableModels.insert(model, at: 0)
+                        if latestFromVM.isModelFavorited(model.id) && !draftConfig.isModelFavorited(model.id) {
+                            draftConfig.favoriteModelIds.append(model.id)
+                        }
+                    }
+                }
+            }
+            viewModel.updateProvider(draftConfig)
         }
         .sheet(item: $modelToConfigure) { model in
             let compositeID = "\(draftConfig.id.uuidString)|\(model.id)"
@@ -479,7 +444,148 @@ struct ProviderDetailView: View {
                 AddAPIKeyView(apiKeys: $draftConfig.apiKeys)
             }
         }
+        .sheet(item: Binding(
+            get: { editingKeyIndex.map { WatchEditKeyTarget(index: $0) } },
+            set: { editingKeyIndex = $0?.index }
+        )) { target in
+            NavigationStack {
+                WatchEditAPIKeyView(key: Binding(
+                    get: { draftConfig.apiKeys.indices.contains(target.index) ? draftConfig.apiKeys[target.index] : "" },
+                    set: { if draftConfig.apiKeys.indices.contains(target.index) { draftConfig.apiKeys[target.index] = $0 } }
+                ))
+            }
+        }
     }
+    
+    @ViewBuilder
+    private var connectionSection: some View {
+        Section(header: Text("连接信息")) {
+            TextField("名称", text: $draftConfig.name)
+            Picker("类型", selection: $draftConfig.apiType) { ForEach(APIType.allCases) { type in Text(type.rawValue).tag(type) } }
+            VStack(alignment: .leading) {
+                Text("Base URL").font(.caption).foregroundColor(.gray)
+                TextField("https://...", text: $draftConfig.baseURL).textInputAutocapitalization(.never).disableAutocorrection(true)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var apiKeysSection: some View {
+        Section(header: Text("API Keys (\(draftConfig.apiKeys.count)个)")) {
+            ForEach(Array(draftConfig.apiKeys.enumerated()), id: \.offset) { index, key in
+                Button {
+                    editingKeyIndex = index
+                } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            HStack(spacing: 4) {
+                                Text("Key \(index + 1)")
+                                    .font(.caption2)
+                                    .foregroundColor(.gray)
+                                if index == draftConfig.currentKeyIndex {
+                                    Text("当前使用")
+                                        .font(.system(size: 9))
+                                        .padding(.horizontal, 4).padding(.vertical, 1)
+                                        .background(Color.green.opacity(0.15))
+                                        .foregroundColor(.green)
+                                        .cornerRadius(4)
+                                }
+                            }
+                            Text(maskAPIKey(key))
+                                .font(.caption)
+                                .foregroundColor(.secondary)
+                        }
+                        Spacer()
+                        Image(systemName: "chevron.right")
+                            .font(.system(size: 10))
+                            .foregroundColor(.gray)
+                    }
+                }
+                .foregroundColor(.primary)
+                .swipeActions(edge: .trailing, allowsFullSwipe: true) {
+                    Button(role: .destructive) {
+                        draftConfig.apiKeys.remove(at: index)
+                        if draftConfig.currentKeyIndex >= draftConfig.apiKeys.count {
+                            draftConfig.currentKeyIndex = max(0, draftConfig.apiKeys.count - 1)
+                        }
+                    } label: { Label("删除", systemImage: "trash") }
+                    Button {
+                        editingKeyIndex = index
+                    } label: { Label("编辑", systemImage: "pencil") }.tint(.blue)
+                }
+            }
+            Button {
+                showAddKeySheet = true
+            } label: {
+                Label("添加新 Key", systemImage: "plus.circle").foregroundColor(.blue)
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var modelManagementSection: some View {
+        Section(header: Text("模型管理")) {
+            NavigationLink {
+                // 注意：这里传递的是 config.id 还是 draftConfig.id 由逻辑决定，通常 id 不变
+                AddCustomModelView(viewModel: viewModel, providerID: draftConfig.id)
+            } label: {
+                Label("手动添加自定义模型", systemImage: "plus.square.dashed").foregroundColor(.blue)
+            }
+            
+            if draftConfig.apiKey.isEmpty {
+                Text("请先填写 API Key").font(.caption).foregroundColor(.gray)
+            } else {
+                Button { validateAndFetch() } label: {
+                    HStack {
+                        Text(isFetching ? "正在获取..." : "获取在线模型列表")
+                        if draftConfig.isValidated && !isFetching { Image(systemName: "checkmark.circle.fill").foregroundColor(.green) }
+                    }
+                }
+                .disabled(isFetching)
+                if let err = fetchError { Text(err).font(.caption2).foregroundColor(.red) }
+            }
+        }
+    }
+    
+    @ViewBuilder
+    private var availableModelsSection: some View {
+        if !fetchedOnlineModels.isEmpty || !draftConfig.availableModels.isEmpty {
+            Section(header: Text("可用模型")) {
+                TextField("搜索模型...", text: $modelSearchText)
+                    .textInputAutocapitalization(.never)
+                ForEach(computedDisplayModels) { model in
+                    let compositeID = "\(draftConfig.id.uuidString)|\(model.id)"
+                    Button { toggleDraftModelFavorite(model: model) } label: {
+                        HStack {
+                            VStack(alignment: .leading) {
+                                HStack {
+                                    Text(model.id).font(.caption)
+                                    if viewModel.checkThinkingSupport(modelId: compositeID) == .supported {
+                                        Image(systemName: "lightbulb.fill").font(.system(size: 10)).foregroundColor(.yellow)
+                                    }
+                                    if viewModel.checkVisionSupport(modelId: compositeID) == .supported {
+                                        Image(systemName: "eye.fill").font(.system(size: 10)).foregroundColor(.green)
+                                    }
+                                }
+                                if let display = model.displayName { Text(display).font(.caption2).foregroundColor(.blue) }
+                            }
+                            Spacer()
+                            Image(systemName: draftConfig.isModelFavorited(model.id) ? "star.fill" : "star")
+                                .foregroundColor(draftConfig.isModelFavorited(model.id) ? .yellow : .gray)
+                        }
+                    }
+                    .swipeActions(edge: .trailing) {
+                        Button {
+                            self.modelToConfigure = model
+                        } label: {
+                            Label("能力配置", systemImage: "slider.horizontal.3")
+                        }
+                        .tint(.orange)
+                    }
+            }
+        }
+    }
+}
     
     // 需要针对 draftConfig 的本地收藏逻辑
     func toggleDraftModelFavorite(model: AIModelInfo) {
@@ -524,15 +630,74 @@ struct ProviderDetailView: View {
         }
     }
     
-    // 切换能力状态: 自动 -> 开启 -> 关闭 -> 自动
-    func nextCapabilityState(_ current: CapabilityState) -> CapabilityState {
-        switch current {
-        case .auto: return .enabled
-        case .enabled: return .disabled
-        case .disabled: return .auto
+    var computedDisplayModels: [AIModelInfo] {
+        mergeModels().filter { model in
+            modelSearchText.isEmpty ||
+            model.id.localizedCaseInsensitiveContains(modelSearchText) ||
+            (model.displayName?.localizedCaseInsensitiveContains(modelSearchText) ?? false)
+        }.sorted { m1, m2 in
+            let isFav1 = draftConfig.isModelFavorited(m1.id)
+            let isFav2 = draftConfig.isModelFavorited(m2.id)
+            if isFav1 != isFav2 { return isFav1 }
+            return m1.id < m2.id
         }
     }
+
 }
+
+// MARK: - 编辑 API Key 辅助类型 (Watch)
+struct WatchEditKeyTarget: Identifiable {
+    var id: Int { index }
+    let index: Int
+}
+
+struct WatchEditAPIKeyView: View {
+    @Binding var key: String
+    @State private var draft: String = ""
+    @State private var isRevealed: Bool = false
+    @Environment(\.dismiss) var dismiss
+
+    var body: some View {
+        Form {
+            Section(header: Text("编辑 API Key"), footer: Text("修改后点击保存生效。")) {
+                HStack {
+                    if isRevealed {
+                        TextField("sk-...", text: $draft)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                            .font(.system(.body, design: .monospaced))
+                    } else {
+                        SecureField("sk-...", text: $draft)
+                            .textInputAutocapitalization(.never)
+                            .disableAutocorrection(true)
+                    }
+                    Button {
+                        isRevealed.toggle()
+                    } label: {
+                        Image(systemName: isRevealed ? "eye.slash" : "eye")
+                            .foregroundColor(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        }
+        .navigationTitle("编辑 Key")
+        .toolbar {
+            ToolbarItem(placement: .cancellationAction) {
+                Button("取消") { dismiss() }
+            }
+            ToolbarItem(placement: .confirmationAction) {
+                Button("保存") {
+                    key = draft.trimmingCharacters(in: .whitespaces)
+                    dismiss()
+                }
+                .disabled(draft.trimmingCharacters(in: .whitespaces).isEmpty)
+            }
+        }
+        .onAppear { draft = key }
+    }
+}
+
 
 struct AddCustomModelView: View {
     @ObservedObject var viewModel: ChatViewModel
@@ -582,7 +747,7 @@ struct AddProviderView: View {
                 TextField("名称", text: $newConfig.name)
                 Picker("类型", selection: $newConfig.apiType) { ForEach(APIType.allCases) { type in Text(type.rawValue).tag(type) } }
                 TextField("Base URL", text: $newConfig.baseURL).textInputAutocapitalization(.never).disableAutocorrection(true)
-                SecureField("API Key", text: $newConfig.apiKey)
+                PasteableSecureField(placeholder: "API Key", text: $newConfig.apiKey)
             }
             Button("保存") {
                 if !newConfig.baseURL.hasPrefix("http") && !newConfig.baseURL.isEmpty { newConfig.baseURL = "https://" + newConfig.baseURL }
@@ -775,8 +940,8 @@ struct AddAPIKeyView: View {
     var body: some View {
         Form {
             Section(header: Text("输入 API Key")) {
-                // v1.8: 使用 SecureField 走 iPhone 安全输入通道，支持可靠粘贴
-                SecureField("sk-...", text: $newKey)
+                // v2.0: 使用 PasteableSecureField 替代 SecureField，修复 watchOS 粘贴失败和后台闪退问题
+                PasteableSecureField(placeholder: "sk-...", text: $newKey)
             }
             Section(footer: Text("添加多个 Key 可实现自动轮询，避免单 Key 限流。")) {
                 Button(action: {
@@ -1333,6 +1498,9 @@ struct CloudVersionListView: View {
     @State private var operationStatus: String? = nil
     @State private var isDeduplicating = false
     @State private var renamingVersion: ChatViewModel.BackupVersion? = nil
+    @State private var showRestoreDialog = false
+    @State private var versionToRestore: ChatViewModel.BackupVersion? = nil
+    @State private var showOverwriteConfirmDialog = false
     
     var body: some View {
         List {
@@ -1395,7 +1563,7 @@ struct CloudVersionListView: View {
                                 operationStatus = result.removed > 0
                                     ? "✅ \(result.message)"
                                     : "ℹ️ \(result.message)"
-                await loadVersions(forceRefresh: true)
+                                await loadVersions(forceRefresh: true)
                             } catch {
                                 operationStatus = "❌ 去重失败: \(error.localizedDescription)"
                             }
@@ -1455,6 +1623,50 @@ struct CloudVersionListView: View {
                 get: { renamingVersion != nil },
                 set: { if !$0 { renamingVersion = nil } }
             ))
+        }
+        .confirmationDialog(
+            "恢复 \(versionToRestore?.label ?? "")",
+            isPresented: $showRestoreDialog,
+            titleVisibility: .visible
+        ) {
+            Button("增量合并 (Merge)", role: .none) {
+                if let v = versionToRestore {
+                    Task {
+                        do {
+                            try await viewModel.restoreBackupVersion(key: v.key, mode: .merge)
+                            operationStatus = "✅ 已合并 \(v.label)"
+                        } catch {
+                            operationStatus = "❌ 合并失败: \(error.localizedDescription)"
+                        }
+                    }
+                }
+            }
+            Button("完全覆盖 (Overwrite)", role: .destructive) {
+                showOverwriteConfirmDialog = true
+            }
+            Button("取消", role: .cancel) { }
+        } message: {
+            Text("请选择恢复模式:\n• 增量合并: 保留现有数据，加入备份中的新内容\n• 完全覆盖: 删除本地所有配置和记忆，替换为备份状态")
+        }
+        .alert(
+            "⚠️ 警告：完全覆盖",
+            isPresented: $showOverwriteConfirmDialog
+        ) {
+            Button("取消", role: .cancel) { }
+            Button("确认覆盖", role: .destructive) {
+                if let v = versionToRestore {
+                    Task {
+                        do {
+                            try await viewModel.restoreBackupVersion(key: v.key, mode: .overwrite)
+                            operationStatus = "✅ 已覆盖 \(v.label)"
+                        } catch {
+                            operationStatus = "❌ 覆盖失败: \(error.localizedDescription)"
+                        }
+                    }
+                }
+            }
+        } message: {
+            Text("此操作将清空手表上的所有配置和记忆，并用「\(versionToRestore?.label ?? "")」完全替换。此操作不可逆，是否继续？")
         }
     }
     
@@ -1529,16 +1741,10 @@ struct CloudVersionListView: View {
             }
         }
         .swipeActions(edge: .leading, allowsFullSwipe: true) {
-            // 右滑：恢复
+            // 右滑：恢复 (触发菜单)
             Button {
-                Task {
-                    do {
-                        try await viewModel.restoreBackupVersion(key: version.key, mode: .overwrite)
-                        operationStatus = "✅ 已恢复 \(version.label)"
-                    } catch {
-                        operationStatus = "❌ 恢复失败: \(error.localizedDescription)"
-                    }
-                }
+                versionToRestore = version
+                showRestoreDialog = true
             } label: {
                 Label("恢复", systemImage: "arrow.counterclockwise")
             }
@@ -1555,6 +1761,7 @@ struct BackupPreviewView: View {
     @State private var isLoading = true
     @State private var errorMessage: String? = nil
     @State private var showRestoreAlert = false
+    @State private var showOverwriteConfirmAlert = false
     @State private var restoreStatus: String? = nil
     
     var body: some View {
@@ -1653,20 +1860,42 @@ struct BackupPreviewView: View {
                 isLoading = false
             }
         }
-        .alert("恢复此版本？", isPresented: $showRestoreAlert) {
+        .confirmationDialog("恢复此版本？", isPresented: $showRestoreAlert, titleVisibility: .visible) {
+            Button("增量合并 (Merge)", role: .none) {
+                Task {
+                    do {
+                        try await viewModel.restoreBackupVersion(key: version.key, mode: .merge)
+                        restoreStatus = "✅ 已合并 \(version.label)"
+                    } catch {
+                        restoreStatus = "❌ 合并失败: \(error.localizedDescription)"
+                    }
+                }
+            }
+            Button("完全覆盖 (Overwrite)", role: .destructive) {
+                // Secondary confirmation
+                showOverwriteConfirmAlert = true
+            }
             Button("取消", role: .cancel) { }
-            Button("覆盖恢复", role: .destructive) {
+        } message: {
+            Text("请选择恢复模式:\n• 增量合并: 保留现有数据，加入备份中的新内容\n• 完全覆盖: 用此备份 (\(version.sizeText)) 替换本地所有数据")
+        }
+        .alert(
+            "⚠️ 警告：完全覆盖",
+            isPresented: $showOverwriteConfirmAlert
+        ) {
+            Button("取消", role: .cancel) { }
+            Button("确认覆盖", role: .destructive) {
                 Task {
                     do {
                         try await viewModel.restoreBackupVersion(key: version.key, mode: .overwrite)
-                        restoreStatus = "✅ 已恢复 \(version.label)"
+                        restoreStatus = "✅ 已覆盖 \(version.label)"
                     } catch {
-                        restoreStatus = "❌ 恢复失败: \(error.localizedDescription)"
+                        restoreStatus = "❌ 覆盖失败: \(error.localizedDescription)"
                     }
                 }
             }
         } message: {
-            Text("将用 \(version.label) (\(version.sizeText)) 覆盖本地所有数据。")
+            Text("此操作将清空手表上的所有配置和记忆，并用「\(version.label)」完全替换。此操作不可逆，是否继续？")
         }
     }
     
@@ -1703,8 +1932,7 @@ struct CloudBackupSettingsView: View {
             }
             
             Section(header: Label("认证密钥", systemImage: "key.fill"), footer: Text("对应 Workers 中配置的 AUTH_KEY。")) {
-                SecureField("X-Auth-Key", text: $draftKey)
-                    .textInputAutocapitalization(.never)
+                PasteableSecureField(placeholder: "X-Auth-Key", text: $draftKey)
                     .font(.system(size: 13))
             }
             
@@ -1713,7 +1941,8 @@ struct CloudBackupSettingsView: View {
                 Button {
                     guard !isTesting else { return }
                     isTesting = true
-                    // 临时应用 draft 值进行测试
+                    // 临时应用 draft 值进行测试，测试完成后始终恢复原值
+                    // 用户需通过"保存"按钮才能真正写入
                     let savedURL = viewModel.cloudBackupURL
                     let savedKey = viewModel.cloudBackupAuthKey
                     viewModel.cloudBackupURL = draftURL.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1721,11 +1950,9 @@ struct CloudBackupSettingsView: View {
                     Task {
                         let result = await viewModel.testCloudConnection()
                         testResult = result
-                        // 如果测试失败，恢复原值
-                        if !result.success {
-                            viewModel.cloudBackupURL = savedURL
-                            viewModel.cloudBackupAuthKey = savedKey
-                        }
+                        // 始终恢复原值，让用户通过保存按钮确认
+                        viewModel.cloudBackupURL = savedURL
+                        viewModel.cloudBackupAuthKey = savedKey
                         isTesting = false
                     }
                 } label: {

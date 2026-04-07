@@ -12,7 +12,7 @@ import WidgetKit
 struct ChatBotWidgetControl: ControlWidget {
     var body: some ControlWidgetConfiguration {
         StaticControlConfiguration(
-            kind: "yamadaryo.dev.ChatBot.watchkitapp.ChatBotWidget",
+            kind: "ChatBotWidget",
             provider: Provider()
         ) { value in
             ControlWidgetToggle(

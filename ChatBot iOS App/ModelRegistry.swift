@@ -34,10 +34,10 @@ class ModelRegistry {
            lowerId.contains("reasoning") ||
            lowerId.contains("deepseek-r1") || // R1 系列
            lowerId.contains("dracarys") ||
-           lowerId.range(of: #"\bo[13]-"#, options: .regularExpression) != nil ||  // o1-xxx / o3-xxx 系列
-           lowerId.range(of: #"\bo[13]$"#, options: .regularExpression) != nil ||  // 纯 o1 / o3
+           lowerId.range(of: #"\bo[13]-"#, options: .regularExpression) != nil || // o1-xxx / o3-xxx
+           lowerId.range(of: #"\bo[13]$"#, options: .regularExpression) != nil ||  // 精确 o1 / o3
            lowerId.contains("cot") ||
-           lowerId.contains("qvq") ||         // QVQ is visual reasoning
+           lowerId.contains("qvq") ||         // QwQ is visual reasoning
            lowerId.contains("gemini-3") ||    // Gemini 3 series usually supports reasoning
            lowerId.contains("gemini-2.5-pro") ||
            lowerId.contains("qwq") {

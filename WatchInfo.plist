@@ -41,9 +41,9 @@
 		<string>UIInterfaceOrientationPortrait</string>
 		<string>UIInterfaceOrientationPortraitUpsideDown</string>
 	</array>
+	<key>WKCompanionAppBundleIdentifier</key>
+	<string>yamadaryo.dev.ChatBot</string>
 	<key>WKApplication</key>
-	<true/>
-	<key>WKWatchOnly</key>
 	<true/>
 </dict>
 </plist>

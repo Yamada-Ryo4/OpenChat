@@ -5,6 +5,7 @@ struct ChatView: View {
     @Environment(\.scenePhase) private var scenePhase
     @EnvironmentObject var viewModel: ChatViewModel // 改为 EnvironmentObject
     @Namespace private var bottomID
+    private let aiContentAnchorID = "aiContentAnchor"  // AI 响应内容底部锚点
     @State private var showHistory = false
     @State private var isAtBottom = true
     
@@ -15,9 +16,16 @@ struct ChatView: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Spacer().frame(height: 5)
                         
-                        if viewModel.currentMessages.isEmpty {
-                            EmptyStateView()
-                        }
+                        if viewModel.isDataLoading {
+                            VStack(spacing: 12) {
+                                ProgressView()
+                                Text("整合本地存储...").font(.caption).foregroundColor(.gray)
+                            }
+                            .frame(maxWidth: .infinity).padding(.vertical, 40)
+                        } else {
+                            if viewModel.currentMessages.isEmpty {
+                                EmptyStateView()
+                            }
                         
                         ForEach(viewModel.currentMessages) { msg in
                             VStack(alignment: .leading, spacing: 4) {
@@ -167,6 +175,11 @@ struct ChatView: View {
                                 .animation(.spring(response: 0.3, dampingFraction: 0.7), value: viewModel.isLoading)
                         }
                         
+                        // AI 内容末尾锚点（向下滑按钮滚到此处，而非输入框）
+                        Color.clear
+                            .frame(height: 0)
+                            .id(aiContentAnchorID)
+                        
                         // 底部输入区域
                         BottomInputArea(viewModel: viewModel)
                             .id(bottomID)
@@ -183,6 +196,7 @@ struct ChatView: View {
                                 )
                         }
                         .frame(height: 1)
+                        }
                     }
                     .padding(.horizontal, 8)
                 }
@@ -206,20 +220,21 @@ struct ChatView: View {
                 .overlay(alignment: .bottom) {
                     if viewModel.showScrollToBottomButton && !isAtBottom && viewModel.currentMessages.count > 2 {
                         Button {
-                            withAnimation(.easeOut(duration: 0.3)) {
-                                proxy.scrollTo(bottomID, anchor: .bottom)
+                            withAnimation(.spring(response: 0.3, dampingFraction: 0.7)) {
+                                proxy.scrollTo(aiContentAnchorID, anchor: .bottom)
                             }
                         } label: {
                             Image(systemName: "chevron.down")
-                                .font(.system(size: 24, weight: .bold))
-                                .foregroundColor(.blue)
-                                .shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1)
+                                .font(.system(size: 20, weight: .bold))
+                                .foregroundColor(.white)
+                                .padding(10)
+                                .background(Circle().fill(Color.blue.opacity(0.8)).shadow(color: .black.opacity(0.3), radius: 2, x: 0, y: 1))
                                 .frame(width: 60, height: 44) // 扩大触控区域
                                 .contentShape(Rectangle())   // 整个区域可点击
                         }
                         .buttonStyle(.plain)
-                        .padding(.bottom, 4)
-                        .transition(.opacity.animation(.easeInOut(duration: 0.2)))
+                        .padding(.bottom, 8)
+                        .transition(.scale.combined(with: .opacity).animation(.spring(response: 0.3, dampingFraction: 0.7)))
                     }
                 }
             }
@@ -583,49 +598,58 @@ struct HistoryListView: View {
                 Button("新建对话") { viewModel.createNewSession(); isPresented = false }
                     .foregroundColor(.blue)
                 
-                ForEach(viewModel.sessions) { session in
-                    Button(action: { viewModel.selectSession(session); isPresented = false }) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(session.title)
-                                .lineLimit(1)
-                            HStack(spacing: 4) {
-                                Text("\(session.messages.count)条")
-                                    .font(.caption2)
-                                    .foregroundColor(.secondary)
-                                if let note = session.note, !note.isEmpty {
-                                    Text("·")
-                                        .foregroundColor(.secondary)
-                                    Text(note)
+                if viewModel.sessions.isEmpty {
+                    Text("暂无聊天记录")
+                        .font(.caption)
+                        .foregroundColor(.gray)
+                        .frame(maxWidth: .infinity, alignment: .center)
+                        .padding(.vertical, 20)
+                        .listRowBackground(Color.clear)
+                } else {
+                    ForEach(viewModel.sessions) { session in
+                        Button(action: { viewModel.selectSession(session); isPresented = false }) {
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(session.title)
+                                    .lineLimit(1)
+                                HStack(spacing: 4) {
+                                    Text("\(session.messages.count)条")
                                         .font(.caption2)
-                                        .foregroundColor(.orange)
-                                        .lineLimit(1)
+                                        .foregroundColor(.secondary)
+                                    if let note = session.note, !note.isEmpty {
+                                        Text("·")
+                                            .foregroundColor(.secondary)
+                                        Text(note)
+                                            .font(.caption2)
+                                            .foregroundColor(.orange)
+                                            .lineLimit(1)
+                                    }
                                 }
                             }
                         }
-                    }
-                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                        // 删除
-                        Button(role: .destructive) {
-                            if let index = viewModel.sessions.firstIndex(where: { $0.id == session.id }) {
-                                viewModel.deleteSession(at: IndexSet(integer: index))
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            // 删除
+                            Button(role: .destructive) {
+                                if let index = viewModel.sessions.firstIndex(where: { $0.id == session.id }) {
+                                    viewModel.deleteSession(at: IndexSet(integer: index))
+                                }
+                            } label: {
+                                Label("删除", systemImage: "trash")
                             }
-                        } label: {
-                            Label("删除", systemImage: "trash")
+                            
+                            // 备注 - 用 NavigationLink
+                            NavigationLink {
+                                NoteEditNavigationView(viewModel: viewModel, session: session)
+                            } label: {
+                                Label("备注", systemImage: "note.text")
+                            }
+                            .tint(.orange)
+                            
+                            // 分享 - 用系统 ShareLink
+                            ShareLink(item: generateExportText(for: session)) {
+                                Label("分享", systemImage: "square.and.arrow.up")
+                            }
+                            .tint(.green)
                         }
-                        
-                        // 备注 - 用 NavigationLink
-                        NavigationLink {
-                            NoteEditNavigationView(viewModel: viewModel, session: session)
-                        } label: {
-                            Label("备注", systemImage: "note.text")
-                        }
-                        .tint(.orange)
-                        
-                        // 分享 - 用系统 ShareLink
-                        ShareLink(item: generateExportText(for: session)) {
-                            Label("分享", systemImage: "square.and.arrow.up")
-                        }
-                        .tint(.green)
                     }
                 }
             }

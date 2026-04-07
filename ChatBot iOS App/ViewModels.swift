@@ -1,8 +1,10 @@
 import SwiftUI
 import PhotosUI
 import Combine
+#if os(watchOS)
 import WatchKit
 import ClockKit
+#endif
 import ImageIO
 import Accelerate
 @MainActor
@@ -20,7 +22,13 @@ class ChatViewModel: ObservableObject {
     @AppStorage("advancedLatexEnabled") var advancedLatexEnabled: Bool = false  // v1.7: 启用高级 LaTeX 渲染模式（可能导致排版问题）
     @AppStorage("thinkingMode") var thinkingModeRaw: String = ThinkingMode.auto.rawValue // v1.6: 思考模式
     @AppStorage("enableMessageAnimation") var enableMessageAnimation: Bool = true  // v1.6: 消息气泡动画
+    
+    // v2.0: 导航路径控制 (用于首页直达聊天)
+    @Published var navigationPath = NavigationPath()
     @AppStorage("appThemeRaw") var appThemeRaw: String = AppTheme.classic.rawValue  // v1.6: 主题配色
+    @AppStorage("preferredColorSchemeRaw") var preferredColorSchemeRaw: String = "dark"  // v2.1: 浅色/深色模式 ("system", "light", "dark")
+    @AppStorage("userName") var userName: String = ""  // v2.1: 用户自定义名称
+    @AppStorage("userAvatarData") var userAvatarData: Data? // v2.2: 自定义用户头像
     @AppStorage("memoryEnabled") var memoryEnabled: Bool = true  // v1.7: 记忆功能开关
     @AppStorage("embeddingProviderID") var embeddingProviderID: String = ""  // v1.7: Embedding 供应商 ID
     @AppStorage("embeddingModelID") var embeddingModelID: String = ""  // v1.7: Embedding 模型 ID
@@ -28,33 +36,30 @@ class ChatViewModel: ObservableObject {
     @AppStorage("detectedEmbeddingDim") var detectedEmbeddingDim: Int = 0  // v1.8: 探测到的向量维度
     @AppStorage("sendTimeToAI") var sendTimeToAI: Bool = true  // 向 AI 传递当前时间
     @AppStorage("sendLocationToAI") var sendLocationToAI: Bool = true  // 向 AI 传递当前位置
-    
-    // --- 极客配置 (Cloudflare Workers AI 专属) ---
-    @AppStorage("workersAIEmbeddingURL") var workersAIEmbeddingURL: String = ""
-    @AppStorage("cloudBackupURL") var cloudBackupURL: String = ""
-    @AppStorage("cloudBackupAuthKey") var cloudBackupAuthKey: String = ""
-
-    // --- v2.1+：与 iOS 同步的用户偏好（之前缺失，导致同步值写入磁盘但 Watch 端从不读取）---
-    @AppStorage("userName") var userName: String = ""
-    @AppStorage("preferredColorSchemeRaw") var preferredColorSchemeRaw: String = "dark"
-    /// 用户头像数据（空 Data 表示未设置）。watchOS @AppStorage 不支持 Optional<Data>，用空值作哨兵
-    @AppStorage("userAvatarData") var userAvatarData: Data = Data()
-    @AppStorage("memoryDeleteConfirm") var memoryDeleteConfirm: Bool = true
-    @AppStorage("memoryMaxRetrievalCount") var memoryMaxRetrievalCount: Int = 5
-    @AppStorage("memoryRetrievalThreshold") var memoryRetrievalThreshold: Double = 0.1
-    @AppStorage("autoRetryEnabled") var autoRetryEnabled: Bool = false
-    @AppStorage("maxRetries") var maxRetries: Int = 3
-    @AppStorage("webSearchEnabled") var webSearchEnabled: Bool = false
-    @AppStorage("webSearchWorkerURL") var webSearchWorkerURL: String = ""
-    @AppStorage("webSearchAuthKey") var webSearchAuthKey: String = ""
-
+    @AppStorage("workersAIEmbeddingURL") var workersAIEmbeddingURL: String = "https://your-domain.com"  // v1.8: Workers AI 向量端点
+    @AppStorage("cloudBackupURL") var cloudBackupURL: String = "https://your-domain.com/config.json"  // v1.10: 云备份端点
+    @AppStorage("cloudBackupAuthKey") var cloudBackupAuthKey: String = "YOUR_AUTH_KEY"  // v1.10: 云备份认证
+    @AppStorage("memoryDeleteConfirm") var memoryDeleteConfirm: Bool = true  // v2.5: 删除记忆需确认
+    @AppStorage("memoryMaxRetrievalCount") var memoryMaxRetrievalCount: Int = 5  // v2.5: 最大检索记忆数
+    @AppStorage("memoryRetrievalThreshold") var memoryRetrievalThreshold: Double = 0.1  // v2.5: 相似度阈值
     @Published var memories: [MemoryItem] = []  // v1.7: 记忆列表
-    @Published var memoryTrash: [MemoryItem] = []  // v2.1: 记忆回收站
+    @Published var deletedMemoriesBin: [MemoryItem] = []  // v2.5: 记忆回收站
+    @Published var pendingMemoryDeletions: [(content: String, index: Int)] = []  // v2.5: 待确认删除
     @Published var migrationProgress: String? = nil  // v1.8: 迁移进度提示
     @Published var cloudUploadStatus: String? = nil  // v1.10: 云上传状态
     @AppStorage("lastCloudSyncTime") var lastCloudSyncTime: Double = 0  // v1.12: 最后同步时间戳
     @AppStorage("autoBackupEnabled") var autoBackupEnabled: Bool = false  // v1.12: 自动备份开关
     @Published var cachedVersions: [BackupVersion]? = nil  // v1.12: 本地缓存的版本列表
+    
+    @AppStorage("autoRetryEnabled") var autoRetryEnabled: Bool = false
+    @AppStorage("maxRetries") var maxRetries: Int = 3
+    
+    // v2.3: 联网搜索 (Web Search Proxy)
+    @AppStorage("webSearchEnabled") var webSearchEnabled: Bool = false
+    @AppStorage("webSearchWorkerURL") var webSearchWorkerURL: String = ""
+    @AppStorage("webSearchAuthKey") var webSearchAuthKey: String = ""  // v2.5: 搜索鉴权密钥
+    @Published var isSearchContextEnabled: Bool = false // 本次对话是否启用搜索
+    
     var previewCache: [String: BackupPreview] = [:]  // v1.12: UUID->预览 缓存
     
     // v1.10: 导入模式
@@ -91,12 +96,29 @@ class ChatViewModel: ObservableObject {
     @Published var currentSessionId: UUID?
     @Published var inputText: String = ""
     @Published var isLoading: Bool = false
-    @Published var isDataLoading: Bool = true // 防止大数据解析阻塞主线程，控制 UI Loading 状态
     @Published var streamingText: String = ""          // v1.6: 流式输出专用（避免全量重渲染）
     @Published var streamingThinkingText: String = ""   // v1.6: 流式思考内容
+    @Published var streamingBlocks: [String] = []       // 防 OOM 分块优化
+    @Published var streamingThinkingBlocks: [String] = []
     @Published var isInputVisible: Bool = true  // 输入框是否可见（用于显示回到底部按钮）
     @Published var selectedImageItem: PhotosPickerItem? = nil
     @Published var selectedImageData: Data? = nil
+    
+    // v2.4: 记忆活动跟踪
+    struct MemoryActivity {
+        var retrievedMemories: [String] = []  // 本轮调用的记忆内容
+        var addedMemories: [String] = []      // 本轮新增的记忆
+        var deletedMemories: [String] = []    // 本轮删除的记忆
+    }
+    @Published var lastMemoryActivity: MemoryActivity? = nil
+    
+    // v2.1: UI Redesign State
+    @Published var isSidebarVisible: Bool = false
+    @Published var searchText: String = ""
+    @Published var isIncognitoMode: Bool = false
+    
+    @Published var isDataLoading: Bool = true // 防止大数据解析阻塞主线程，控制 UI Loading 状态
+    
     private let service = LLMService()
     private var currentTask: Task<Void, Never>?
     
@@ -108,11 +130,13 @@ class ChatViewModel: ObservableObject {
         // v1.6: 清空流式状态
         streamingText = ""
         streamingThinkingText = ""
+        streamingBlocks = []
+        streamingThinkingBlocks = []
     }
     init() {
-        // 核心：WatchOS watchdog 严格限制时间，不要在主线程 decode 庞大的 JSON (chatSessions, userMemories)
+        // v2.1 性能优化：剥离体积庞大的解码逻辑到后台线程，避免占用主线程导致启动卡顿
         
-        // 启动定位以备用 (由于不需要强制等，可放主线程立刻去申请)
+        // 启动定位以备用 (可以在主线程立刻启动)
         LocationService.shared.requestPermission()
         LocationService.shared.updateLocation()
         
@@ -122,13 +146,13 @@ class ChatViewModel: ObservableObject {
             Task { @MainActor in self.loadFromCloud() }
         }
         
-        // 监听 iPhone WatchConnectivity 配置推送
+        // 监听 Watch WatchConnectivity 配置推送
         NotificationCenter.default.addObserver(forName: WatchSessionManager.configDidUpdateNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self = self else { return }
             Task { @MainActor in self.reloadFromWatchConnectivity() }
         }
         
-        // 监听 iPhone WatchConnectivity 大文件传输（聊天记录+记忆）完成
+        // 监听 Watch WatchConnectivity 大文件传输（聊天记录+记忆）完成
         NotificationCenter.default.addObserver(forName: .init("WatchConnectivityDidReceiveFullData"), object: nil, queue: .main) { [weak self] _ in
             guard let self = self else { return }
             Task { @MainActor in self.reloadFromWatchConnectivity() }
@@ -139,7 +163,7 @@ class ChatViewModel: ObservableObject {
         }
     }
     
-    // v2.1 性能优化：剥离体积庞大的解码逻辑到后台线程，避免 WatchOS APP 开启卡死转圈后闪退
+    // 后台加载大型本地数据
     private func loadAllDataOffMainThread() async {
         // 定义最新的预设供应商
         let latestPresets: [ProviderConfig] = [
@@ -161,7 +185,8 @@ class ChatViewModel: ObservableObject {
             sessions: [ChatSession],
             settings: [String: ModelSettings],
             memories: [MemoryItem],
-            trash: [MemoryItem]
+            trash: [MemoryItem],
+            currentStoredSessionId: String?
         ) in
             // 1. 在完全独立的后台线程中执行 I/O 读取 (避免主线程 plist 解析卡顿)
             let defaults = UserDefaults.standard
@@ -169,7 +194,10 @@ class ChatViewModel: ObservableObject {
             let sessionsData = defaults.data(forKey: "chatSessions_v1")
             let settingsData = defaults.data(forKey: "modelSettings")
             let memoriesData = defaults.data(forKey: "userMemories_v1")
-            let trashData = defaults.data(forKey: "memoryTrash_v1")
+            let trashData = defaults.data(forKey: "deletedMemoriesBin_v1")
+            
+            // 由于 NavigationPath 不能在其他线程直接赋值传递，我们在后台取 String ID，前台组装
+            let currentSIdStr = defaults.string(forKey: "currentSessionId_v1")
             
             // providers 解析逻辑
             var pFinal: [ProviderConfig] = latestPresets
@@ -229,7 +257,7 @@ class ChatViewModel: ObservableObject {
                 tFinal = decoded
             }
             
-            return (pFinal, sFinal, stFinal, mFinal, tFinal)
+            return (pFinal, sFinal, stFinal, mFinal, tFinal, currentSIdStr)
         }.value
         
         // 2. 将后台解析好的大型对象写回主线程 @Published
@@ -238,11 +266,22 @@ class ChatViewModel: ObservableObject {
         
         self.sessions = result.sessions
         if self.sessions.isEmpty { self.createNewSession() }
-        else if self.currentSessionId == nil { self.currentSessionId = self.sessions.first?.id }
+        else if self.currentSessionId == nil {
+            if let stringId = result.currentStoredSessionId, let parsedId = UUID(uuidString: stringId) {
+                self.currentSessionId = parsedId
+            } else {
+                self.currentSessionId = self.sessions.first?.id
+            }
+        }
+        
+        // v2.0: 启动时直接进入最后一次会话
+        if let id = self.currentSessionId {
+            self.navigationPath = NavigationPath([id])
+        }
         
         self.modelSettings = result.settings
         self.memories = result.memories
-        self.memoryTrash = result.trash
+        self.deletedMemoriesBin = result.trash
         
         // 数据准备就绪，关闭遮罩
         self.isDataLoading = false
@@ -261,7 +300,7 @@ class ChatViewModel: ObservableObject {
         NotificationCenter.default.removeObserver(self)
     }
     
-    // 从云端/本地重新加载配置 (静默同步)
+    // 从云端/本地重新加载配置
     func loadFromCloud() {
         let data = UserDefaults.standard.data(forKey: "savedProviders_v3")
         Task { [weak self] in
@@ -285,7 +324,7 @@ class ChatViewModel: ObservableObject {
         let sData = defaults.data(forKey: "chatSessions_v1")
         let settingsData = defaults.data(forKey: "modelSettings")
         let memData = defaults.data(forKey: "userMemories_v1")
-        let trashData = defaults.data(forKey: "memoryTrash_v1")
+        let trashData = defaults.data(forKey: "deletedMemoriesBin_v1")
         
         Task { [weak self] in
             let result = await Task.detached(priority: .background) { () -> (
@@ -317,10 +356,10 @@ class ChatViewModel: ObservableObject {
             if let s = result.sessions { self?.sessions = s }
             if let st = result.settings { self?.modelSettings = st }
             if let m = result.memories { self?.memories = m }
-            if let t = result.trash { self?.memoryTrash = t }
+            if let t = result.trash { self?.deletedMemoriesBin = t }
             
             self?.objectWillChange.send()
-            print("📱 [ViewModel] 已从 iPhone 同步刷新全部数据")
+            print("⌚ [ViewModel] 已从 Watch 同步刷新全部数据")
         }
     }
     
@@ -332,44 +371,69 @@ class ChatViewModel: ObservableObject {
         saveSessions()
     }
     func selectSession(_ session: ChatSession) { currentSessionId = session.id }
+    // v2.1: 重命名会话
+    func renameSession(id: UUID, newTitle: String) {
+        if let index = sessions.firstIndex(where: { $0.id == id }) {
+            sessions[index].title = newTitle
+            saveSessions()
+        }
+    }
+
     func deleteSession(at offsets: IndexSet) {
         let idsToDelete = offsets.map { sessions[$0].id }
         sessions.remove(atOffsets: offsets)
-        if let current = currentSessionId, idsToDelete.contains(current) { if let first = sessions.first { currentSessionId = first.id } else { createNewSession() } }
+        if let current = currentSessionId, idsToDelete.contains(current) {
+            if let first = sessions.first { currentSessionId = first.id } else { createNewSession() }
+        }
         saveSessions()
     }
     func saveSessions() {
-        // BUG-2 fix: persist currentSessionId
+        // v2.1: Incognito Mode - Do not save to disk
+        if isIncognitoMode { return }
+        
+        // BUG-2 fix: persist currentSessionId so it survives App restarts
         if let id = currentSessionId {
             UserDefaults.standard.set(id.uuidString, forKey: "currentSessionId_v1")
         }
         
-        // BUG-3 / OOM fix: move heavy JSON encoding off the main thread
         let sessionsCopy = self.sessions
-        Task.detached(priority: .background) { [sessionsCopy] in
-            guard let encoded = try? JSONEncoder().encode(sessionsCopy) else { return }
-            UserDefaults.standard.set(encoded, forKey: "chatSessions_v1")
-            
-            // 轻量级 Widget 数据
-            if let first = sessionsCopy.first {
-                var msg = "No messages"
-                if let lastM = first.messages.last(where: { $0.role != .system }) {
-                    msg = String(lastM.text.prefix(80)) // 限制长度防止过大
+        Task.detached(priority: .background) {
+            if let encoded = try? JSONEncoder().encode(sessionsCopy) {
+                UserDefaults.standard.set(encoded, forKey: "chatSessions_v1")
+                
+                // 写入轻量级数据供 Widget 使用，防止 OOM
+                if let first = sessionsCopy.first {
+                    var msg = "No messages"
+                    if let lastM = first.messages.last(where: { $0.role != .system }) {
+                        msg = lastM.text
+                    }
+                    let widgetData: [String: String] = ["title": first.title, "lastMessage": msg]
+                    UserDefaults.standard.set(widgetData, forKey: "widget_tiny_data")
+                } else {
+                     UserDefaults.standard.set(["title": "ChatBot", "lastMessage": "No conversations"], forKey: "widget_tiny_data")
                 }
-                let widgetData: [String: String] = ["title": first.title, "lastMessage": msg]
-                UserDefaults.standard.set(widgetData, forKey: "widget_tiny_data")
-            } else {
-                UserDefaults.standard.set(["title": "ChatBot", "lastMessage": "No conversations"], forKey: "widget_tiny_data")
-            }
+            // 确保 WidgetKit 刷新数据 (如果没有 App Group，这步其实无法跨进程刷新，这里主要为了逻辑完整性)
+             #if canImport(WidgetKit)
+             // WidgetCenter.shared.reloadAllTimelines() // 主 App 无法直接调用 WidgetCenter 刷新，除非配置了正确的目标
+             #endif
 
-            // 刷新表盘组件（必须在主线程）
-            await MainActor.run {
-                let server = CLKComplicationServer.sharedInstance()
-                for complication in server.activeComplications ?? [] {
-                    server.reloadTimeline(for: complication)
+                // 刷新表盘组件
+                #if os(watchOS)
+                DispatchQueue.main.async {
+                    let server = CLKComplicationServer.sharedInstance()
+                    for complication in server.activeComplications ?? [] {
+                        server.reloadTimeline(for: complication)
+                    }
                 }
+                #endif
             }
         }
+    }
+    
+    var filteredSessions: [ChatSession] {
+        let sorted = sessions.sorted { $0.lastModified > $1.lastModified }
+        if searchText.isEmpty { return sorted }
+        return sorted.filter { $0.title.localizedCaseInsensitiveContains(searchText) }
     }
     
     var currentMessages: [ChatMessage] {
@@ -396,22 +460,35 @@ class ChatViewModel: ObservableObject {
                 sessions[index].title = String(cleanText.prefix(15)) + (cleanText.count > 15 ? "..." : "")
             }
         }
-        // OOM fix: 移除 sessions.sort() 热路径调用。
-        // sort 会导致 Swift COW 对整个 sessions 数组做内存拷贝，在流式输出期间每 150ms 距矩执行一次容易 OOM。
-        // 排序只在对话切换/删除/保存时才需要（由 selectSession, deleteSession, saveSessions 负责）。
+        
+        // 移除了高频的 sessions.sort()
+        // 在流式输出期间，频繁对包含大量数据的 sessions 进行排序会引发极高内存分配 (OOM)
+        // 会话排序在启动时和保存时处理即可由于当前会话必定是最新的，不需要每秒排 6 次。
     }
     
     // MARK: - 供应商与模型逻辑
     func saveProviders() {
-        if let encoded = try? JSONEncoder().encode(providers) {
-            savedProvidersData = encoded
-            // 自动推送到 iPhone（防止同步循环）
-            if !WatchSessionManager.shared.isSyncingFromRemote {
-                WatchSessionManager.shared.pushConfigToPhone()
+        let providersCopy = self.providers
+        Task.detached(priority: .background) {
+            if let encoded = try? JSONEncoder().encode(providersCopy) {
+                UserDefaults.standard.set(encoded, forKey: "savedProviders_v3")
+                // 写入完成后跳回主线程推送 Watch（WatchSessionManager 非线程安全）
+                await MainActor.run {
+                    if !WatchSessionManager.shared.isSyncingFromRemote {
+                        WatchSessionManager.shared.pushConfigToWatch()
+                    }
+                }
             }
         }
     }
     
+    func updateProvider(_ updated: ProviderConfig) {
+        if let index = providers.firstIndex(where: { $0.id == updated.id }) {
+            providers[index] = updated
+            saveProviders()
+        }
+    }
+
     // 自动验证供应商（首次启动时调用）
     @MainActor
     private func autoValidateProvider(index: Int) async {
@@ -485,13 +562,6 @@ class ChatViewModel: ObservableObject {
         }
         await MainActor.run { saveProviders() }
         return (success, failed)
-    }
-    
-    func updateProvider(_ updated: ProviderConfig) {
-        if let index = providers.firstIndex(where: { $0.id == updated.id }) {
-            providers[index] = updated
-            saveProviders()
-        }
     }
     
     func toggleModelFavorite(providerID: UUID, model: AIModelInfo) {
@@ -686,7 +756,6 @@ class ChatViewModel: ObservableObject {
             return (false, "URL 无效")
         }
         
-        let filename = baseURL.lastPathComponent
         let baseString = baseURL.deletingLastPathComponent().absoluteString
         guard let renameURL = URL(string: "\(baseString)rename/\(key)") else {
             return (false, "URL 构造失败")
@@ -704,7 +773,7 @@ class ChatViewModel: ObservableObject {
             let body = ["name": name]
             request.httpBody = try JSONEncoder().encode(body)
             
-            let (data, response) = try await URLSession.shared.data(for: request)
+            let (_, response) = try await URLSession.shared.data(for: request)
             let httpResponse = response as? HTTPURLResponse
             let statusCode = httpResponse?.statusCode ?? 0
             
@@ -1145,7 +1214,8 @@ class ChatViewModel: ObservableObject {
     func performAutoBackupIfNeeded() {
         guard autoBackupEnabled,
               !cloudBackupURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-        
+        // BUG-12 fix: 防止并发上传（检查是否已在进行中）
+        guard cloudUploadStatus != "⬆️ 正在上传..." else { return }
         Task {
             await uploadConfigToCloud()
             print("☁️ 自动备份完成")
@@ -1243,9 +1313,6 @@ class ChatViewModel: ObservableObject {
                 if !memories.contains(where: { $0.content == mem.content }) {
                     memories.append(mem)
                 }
-            }
-            if memories.count > maxMemoryCount {
-                memories = Array(memories.prefix(maxMemoryCount))
             }
             saveMemories()
         }
@@ -1417,18 +1484,30 @@ class ChatViewModel: ObservableObject {
         
         // v1.5: 记录发送时间
         let sendTime = Date()
+        // v2.4: Capture query BEFORE clearing inputText (was a bug: search query was always empty)
+        let localQuery = inputText
+        let localSearchEnabled = isSearchContextEnabled && webSearchEnabled
+        
         var userMsg = ChatMessage(role: .user, text: inputText, imageData: selectedImageData)
         userMsg.sendTime = sendTime
         msgs.append(userMsg)
         updateCurrentSessionMessages(msgs)
         
         inputText = ""; selectedImageItem = nil; selectedImageData = nil; isLoading = true
-        if enableHapticFeedback { WKInterfaceDevice.current().play(.click) } // 开始生成震动
+        if enableHapticFeedback {
+            #if os(watchOS)
+            WKInterfaceDevice.current().play(.click)
+            #else
+            UIImpactFeedbackGenerator(style: .light).impactOccurred()
+            #endif
+        } // 开始生成震动
 
         // v1.6: 初始化流式输出状态
         streamingText = ""
         streamingThinkingText = ""
-        
+        streamingBlocks = []            // v2.5: 修复重复显示上一次回复
+        streamingThinkingBlocks = []    // v2.5: 同上
+        lastMemoryActivity = nil // v2.4: 重置记忆活动
         // v1.5: AI 消息也记录发送时间
         var assistantMsg = ChatMessage(role: .assistant, text: "")
         assistantMsg.sendTime = sendTime
@@ -1436,215 +1515,85 @@ class ChatViewModel: ObservableObject {
         updateCurrentSessionMessages(msgs)
         let botIndex = msgs.count - 1
         
-        // v1.12: 首 Token 时间跟踪
-        var firstTokenReceived = false
-        var localFirstTokenTime: Date? = nil
-        
         currentTask = Task {
-            let history = await buildHistoryWithContext(from: msgs)
-
-            var responseText = ""
-            var thinkingText = ""
-            
-            // v1.8.1: 流式解析状态机 (优化性能)
-            var isThinking = false
-            var pendingBuffer = ""
-            var hasSeenFirstThink = false
-            var responseTextBeforeThink = ""
-            
-            // v1.6: 性能优化 - 200ms 节流（只更新 streamingText，不触发全量 diff）
-            var lastUIUpdateTime = Date()
-            let uiUpdateInterval: TimeInterval = 0.15  // 150ms 平衡流畅度和性能
-            var pendingUpdate = false
-            
-            do {
-                let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
-                for try await chunk in stream {
-                    // 检查是否被取消
-                    if Task.isCancelled { break }
-                    
-                    // v1.12: 记录首 Token 时间
-                    if !firstTokenReceived {
-                        firstTokenReceived = true
-                        localFirstTokenTime = Date()
-                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                            currentMsgs[botIndex].firstTokenTime = localFirstTokenTime
-                            updateCurrentSessionMessagesInMemory(currentMsgs)
-                        }
-                    }
-                    
-                    // 2. 直接将网络层的 chunk 送入缓冲
-                    // 底层 LLMService 会原生利用 reasoning_content 并添加外层 <think> 标签包裹
-                    // 此处的 buffer 现在仅作为流式状态机控制 UI 卡片
-                    pendingBuffer += chunk
-                    
-                    // 3. 状态机解析：基于不可逆状态的标记点引擎
-                    let startTag = "<think>"
-                    let endTag = "</think>"
-                    
-                    while true {
-                        // 寻找的目标：如果还没完成思考闭环且不在思考中，找 startTag。
-                        // 如果在思考中，找 endTag。
-                        // 如果已经完成思考闭环 (hasSeenFirstThink == true && !isThinking)，就不再找任何 Tag。
-                        let currentTag: String? = {
-                            if isThinking { return endTag }
-                            if !hasSeenFirstThink { return startTag }
-                            return nil
-                        }()
-                        
-                        if let target = currentTag, let range = pendingBuffer.range(of: target, options: .caseInsensitive) {
-                            // 找到了目标标签
-                            let textBefore = String(pendingBuffer[..<range.lowerBound])
-                            
-                            if isThinking {
-                                // 闭合思考区
-                                thinkingText += textBefore
-                                isThinking = false
-                                hasSeenFirstThink = true // 永久锁定！之后不管是正文探讨格式还是引用代码里的 <think>，通通当作文本！
-                                
-                                responseTextBeforeThink = responseText
-                                responseText = ""
-                            } else {
-                                // 开启首次思考区
-                                responseText += textBefore
-                                isThinking = true
-                            }
-                            
-                            pendingBuffer = String(pendingBuffer[range.upperBound...])
-                        } else {
-                            // 没找到完整标签，检查缓冲末尾是否有当前寻找标签的前缀
-                            var safeLength = pendingBuffer.count
-                            
-                            if let target = currentTag {
-                                let maxPrefixLen = target.count - 1
-                                if maxPrefixLen > 0 {
-                                    for i in (1...maxPrefixLen).reversed() { // 从长到短检查
-                                        if pendingBuffer.count >= i {
-                                            let suffix = String(pendingBuffer.suffix(i))
-                                            if target.lowercased().hasPrefix(suffix.lowercased()) {
-                                                safeLength = pendingBuffer.count - i
-                                                break
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            if safeLength > 0 {
-                                let safeContent = String(pendingBuffer.prefix(safeLength))
-                                if isThinking { thinkingText += safeContent }
-                                else { responseText += safeContent }
-                                pendingBuffer = String(pendingBuffer.suffix(from: pendingBuffer.index(pendingBuffer.startIndex, offsetBy: safeLength)))
-                            }
-                            break // 退出循环，等待下一个 chunk
-                        }
-                    }
-                    
-                    // v1.6: 高性能流式更新 — 只更新 streamingText，不碰 sessions
-                    let now = Date()
-                    if now.timeIntervalSince(lastUIUpdateTime) >= uiUpdateInterval {
-                        let finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
-                        streamingText = finalContent
-                        if thinkingMode != .disabled {
-                            streamingThinkingText = thinkingText
-                        }
-                        lastUIUpdateTime = now
-                        pendingUpdate = false
-                    } else {
-                        pendingUpdate = true
+            var searchContext: String? = nil
+            if localSearchEnabled, !webSearchWorkerURL.isEmpty {
+                await MainActor.run { self.streamingText = "🧠 提取搜索关键词..." }
+                let extractQuery = await self.extractSearchQuery(from: localQuery, context: msgs)
+                if extractQuery.contains("[不需要搜索]") {
+                    print("🧠 意图判定：无搜索必要，跳过联网检索。")
+                    await MainActor.run { self.streamingText = "" }
+                } else {
+                    await MainActor.run { self.streamingText = "🔍 正在检索网络: \(extractQuery)..." }
+                    print("🔍 搜索开始: original=\(localQuery), extracted=\(extractQuery), url=\(webSearchWorkerURL), hasAuth=\(!webSearchAuthKey.isEmpty)")
+                    do {
+                        let results = try await service.fetchWebSearchResults(query: extractQuery, workerURL: webSearchWorkerURL, authKey: webSearchAuthKey)
+                        searchContext = results
+                        print("✅ 搜索完成: \(results.prefix(100))...")
+                        await MainActor.run { self.streamingText = "" }
+                    } catch {
+                        print("⚠️ Web Search Failed: \(error)")
+                        await MainActor.run { self.streamingText = "" }
                     }
                 }
-                
-                // 循环结束，处理剩余 Buffer
-                if !pendingBuffer.isEmpty {
-                    if isThinking {
-                         thinkingText += pendingBuffer
-                    } else {
-                         responseText += pendingBuffer
-                    }
-                }
-                
-                // v1.6: 流式完成 — 一次性写入 sessions（触发完整 Markdown 渲染）
-                let finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
-                let finalThinking = thinkingText
-                
-                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                    currentMsgs[botIndex].text = finalContent
-                    
-                    if thinkingMode == .disabled {
-                        currentMsgs[botIndex].thinkingContent = nil
-                    } else {
-                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                    }
-                    
-                    // v1.12: 记录完成时间
-                    currentMsgs[botIndex].completeTime = Date()
-                    if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
-                    
-                    // 先清空流式状态，再写入 sessions
-                    streamingText = ""
-                    streamingThinkingText = ""
-                    updateCurrentSessionMessagesInMemory(currentMsgs)
-                }
-                
-                // 流式输出完成后，一次性保存到磁盘
-                saveSessions()
-                // 生成完成：成功震动
-                if enableHapticFeedback { WKInterfaceDevice.current().play(.success) }
-                
-                // v1.7: 后台提取记忆（非阻塞）
-                if self.memoryEnabled {
-                    Task { [weak self] in
-                        await self?.extractMemories()
-                    }
-                }
-                
-                // v1.7: 自动生成会话标题（首次对话时）
-                if let session = self.sessions.first(where: { $0.id == self.currentSessionId }),
-                   session.title == "新对话",
-                   let firstUserMsg = session.messages.first(where: { $0.role == .user }) {
-                    Task { [weak self] in
-                        await self?.generateSessionTitle(from: firstUserMsg.text)
-                    }
-                }
-            } catch {
-                // v1.6: 先清空流式状态
-                streamingText = ""
-                streamingThinkingText = ""
-                
-                // 如果是取消错误，标记为用户停止
-                if Task.isCancelled {
-                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        // 写入已积累的文本
-                        let finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
-                        currentMsgs[botIndex].text = finalContent.isEmpty ? "" : finalContent + "\n[已停止]"
-                        if thinkingMode != .disabled && !thinkingText.isEmpty {
-                            currentMsgs[botIndex].thinkingContent = thinkingText
-                        }
-                        updateCurrentSessionMessagesInMemory(currentMsgs)
-                    }
-                    saveSessions()
-                    if enableHapticFeedback { WKInterfaceDevice.current().play(.directionDown) }
-                } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                    let finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if finalContent.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
-                    else { currentMsgs[botIndex].text = finalContent + "\n[中断]" }
-                    if thinkingMode != .disabled && !thinkingText.isEmpty {
-                        currentMsgs[botIndex].thinkingContent = thinkingText
-                    }
-                    updateCurrentSessionMessagesInMemory(currentMsgs)
-                    saveSessions()
-                    if enableHapticFeedback { WKInterfaceDevice.current().play(.failure) }
-                }
+            } else if localSearchEnabled {
+                print("⚠️ 搜索已启用但 URL 为空")
             }
-            isLoading = false
-            currentTask = nil
+            
+            let history = await buildHistoryWithContext(from: msgs, searchContext: searchContext)
+            await streamChatResponse(
+                history: history,
+                modelID: modelID,
+                provider: provider,
+                botIndex: botIndex
+            )
+            
+            // v2.6 Toggle persists until turned off manually
         }
     }
     
-    /// 构建带系统上下文的历史消息列表（注入记忆、时间、位置等）
-    private func buildHistoryWithContext(from msgs: [ChatMessage]) async -> [ChatMessage] {
+    /// 构建带系统上下文的历史消息列表（注入记忆、时间、位置、搜索等）
+    private func buildHistoryWithContext(from msgs: [ChatMessage], searchContext: String? = nil) async -> [ChatMessage] {
         var history = msgs.dropLast(1).suffix(max(historyMessageCount, 1)).map { $0 }
+        
+        // v2.9: 辅助模型自动压缩超长上下文
+        let totalChars = history.reduce(0) { $0 + $1.text.count }
+        if totalChars > 8000 && !helperGlobalModelID.isEmpty && history.count > 3 {
+            let messagesToCompress = Array(history.prefix(history.count - 2))
+            let keptMessages = Array(history.suffix(2))
+            
+            let conversationText = messagesToCompress.map { "\($0.role == .user ? "User" : "AI"): \($0.text)" }.joined(separator: "\n")
+            let summaryPrompt = """
+            请将以下历史对话压缩为高密度的核心上下文摘要，保留关键事实、核心逻辑和未解决的语境，剔除日常寒暄和所有无意义的中间推理过程：
+            
+            \(conversationText)
+            """
+            
+            let summaryMsg = ChatMessage(role: .user, text: summaryPrompt)
+            print("🗜️ 触发上下文压缩 (原始文本长度: \(totalChars))...")
+            
+            var compressedText = ""
+            let components = helperGlobalModelID.split(separator: "|")
+            if components.count == 2,
+               let providerID = UUID(uuidString: String(components[0])),
+               let provider = providers.first(where: { $0.id == providerID }) {
+                let modelID = String(components[1])
+                do {
+                    let stream = service.streamChat(messages: [summaryMsg], modelId: modelID, config: provider, temperature: 0.1)
+                    for try await chunk in stream {
+                        compressedText += chunk
+                    }
+                    if !compressedText.isEmpty {
+                        print("✅ 上下文压缩完成 (摘要长度: \(compressedText.count))")
+                        var newHistory = [ChatMessage(role: .system, text: "【以往对话摘要】\n" + compressedText)]
+                        newHistory.append(contentsOf: keptMessages)
+                        history = newHistory
+                    }
+                } catch {
+                    print("❌ 上下文压缩失败: \(error)")
+                }
+            }
+        }
         
         // 构造系统上下文
         var systemParts: [String] = []
@@ -1653,6 +1602,8 @@ class ChatViewModel: ObservableObject {
         if !customSystemPrompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             systemParts.append(customSystemPrompt)
         }
+        
+
         
         // 2. v1.7: 注入长期记忆（全量回退模式）
         if memoryEnabled && !memories.isEmpty {
@@ -1663,30 +1614,41 @@ class ChatViewModel: ObservableObject {
             // 检查是否有带 embedding 的记忆且已配置 Embedding 提供商
             let hasEmbeddings = memories.contains(where: { $0.embedding != nil })
             if hasEmbeddings, let (embConfig, embModel) = getEmbeddingProvider(), !userQuery.isEmpty {
-                // 向量检索 Top-5（综合相似度 + 重要性）
+                // 向量检索 Top-K（综合相似度 + 重要性）
                 if let queryEmb = try? await service.fetchEmbedding(text: userQuery, modelId: embModel, config: embConfig) {
-                    var scored: [(MemoryItem, Float)] = memories.map { m in
+                    var scored: [(MemoryItem, Float)] = memories.compactMap { m in
                         let similarity = m.embedding.map { cosineSimilarity(queryEmb, $0) } ?? 0.3
+                        // v2.5: 相似度阈值过滤
+                        guard similarity >= Float(self.memoryRetrievalThreshold) else { return nil }
                         let finalScore = similarity * 0.7 + m.importance * 0.3
                         return (m, finalScore)
                     }
                     scored.sort { $0.1 > $1.1 }
-                    relevantMemories = scored.prefix(5).map { $0.0 }
+                    relevantMemories = scored.prefix(memoryMaxRetrievalCount).map { $0.0 }
                 } else {
-                    relevantMemories = Array(memories.sorted { $0.importance > $1.importance }.prefix(10))
+                    relevantMemories = Array(memories.sorted { $0.importance > $1.importance }.prefix(memoryMaxRetrievalCount))
                 }
             } else {
-                // 无 Embedding，按重要性排序注入（最多 10 条）
-                relevantMemories = Array(memories.sorted { $0.importance > $1.importance }.prefix(10))
+                // 无 Embedding，按重要性排序注入
+                relevantMemories = Array(memories.sorted { $0.importance > $1.importance }.prefix(memoryMaxRetrievalCount))
             }
             
             if !relevantMemories.isEmpty {
                 let memoryLines = relevantMemories.map { "- \($0.content)" }.joined(separator: "\n")
                 systemParts.append("你知道以下关于用户的信息（长期记忆）：\n\(memoryLines)")
+                
+                // v2.4: 记录本轮调用的记忆
+                await MainActor.run {
+                    var activity = self.lastMemoryActivity ?? MemoryActivity()
+                    activity.retrievedMemories = relevantMemories.map { $0.content }
+                    self.lastMemoryActivity = activity
+                }
             }
         }
         
-        // 3. 时间和位置信息（可由用户关闭）
+        // 4. (已移除强制思考格式，避免弄巧成拙)
+        
+        // 5. 时间和位置信息（可由用户关闭）
         var contextInfo = ""
         if sendTimeToAI {
             contextInfo = "Current Time: \(Date().formatted(date: .numeric, time: .standard))"
@@ -1697,6 +1659,11 @@ class ChatViewModel: ObservableObject {
         }
         if !contextInfo.isEmpty {
             systemParts.append(contextInfo)
+        }
+        
+        // 6. Web Search Context
+        if let sc = searchContext {
+            systemParts.append(sc)
         }
         
         // 合并系统消息
@@ -1718,33 +1685,71 @@ class ChatViewModel: ObservableObject {
     
     // MARK: - 记忆系统 (v1.7)
     
-    private let maxMemoryCount = 200  // v1.8: 扩容
-    
     func saveMemories() {
-        if let encoded = try? JSONEncoder().encode(memories) {
-            UserDefaults.standard.set(encoded, forKey: "userMemories_v1")
+        let memoriesCopy = self.memories
+        Task.detached(priority: .background) {
+            if let encoded = try? JSONEncoder().encode(memoriesCopy) {
+                UserDefaults.standard.set(encoded, forKey: "userMemories_v1")
+                // 备份重心已转移至 R2，不再同步到 iCloud KVS（1MB 限制易溢出）
+            }
         }
     }
     
     func loadMemories() {
+        // 从本地 UserDefaults 加载（备份/恢复走 R2）
         if let data = UserDefaults.standard.data(forKey: "userMemories_v1"),
            let decoded = try? JSONDecoder().decode([MemoryItem].self, from: data) {
             memories = decoded
         }
-    }
-    
-    // v2.1: 回收站存取
-    func saveMemoryTrash() {
-        if let encoded = try? JSONEncoder().encode(memoryTrash) {
-            UserDefaults.standard.set(encoded, forKey: "memoryTrash_v1")
-        }
-    }
-    
-    func loadMemoryTrash() {
-        if let data = UserDefaults.standard.data(forKey: "memoryTrash_v1"),
+        // v2.5: 加载回收站
+        if let data = UserDefaults.standard.data(forKey: "deletedMemoriesBin_v1"),
            let decoded = try? JSONDecoder().decode([MemoryItem].self, from: data) {
-            memoryTrash = decoded
+            deletedMemoriesBin = decoded
         }
+    }
+    
+    // v2.5: 回收站持久化
+    func saveDeletedBin() {
+        if let encoded = try? JSONEncoder().encode(deletedMemoriesBin) {
+            UserDefaults.standard.set(encoded, forKey: "deletedMemoriesBin_v1")
+        }
+    }
+    
+    // v2.5: 软删除（移到回收站）
+    func softDeleteMemory(at index: Int) {
+        guard index < memories.count else { return }
+        var item = memories.remove(at: index)
+        item.deletedAt = Date() // 打上删除时间戳
+        deletedMemoriesBin.insert(item, at: 0) // 放回最前面
+        saveMemories()
+        saveDeletedBin()
+        WatchSessionManager.shared.pushFullDataToWatch() // 同步到手表
+    }
+    
+    // v2.5: 从回收站恢复
+    func restoreMemory(at index: Int) {
+        guard index < deletedMemoriesBin.count else { return }
+        var item = deletedMemoriesBin.remove(at: index)
+        item.deletedAt = nil // 移除删除标记
+        memories.insert(item, at: 0) // 恢复到最前面
+        saveMemories()
+        saveDeletedBin()
+        WatchSessionManager.shared.pushFullDataToWatch() // 同步到手表
+    }
+    
+    // v2.5: 永久删除（从回收站彻底删除）
+    func permanentlyDeleteMemory(at index: Int) {
+        guard index < deletedMemoriesBin.count else { return }
+        deletedMemoriesBin.remove(at: index)
+        saveDeletedBin()
+        WatchSessionManager.shared.pushFullDataToWatch() // 同步到手表
+    }
+    
+    // v2.5: 清空回收站
+    func emptyRecycleBin() {
+        deletedMemoriesBin.removeAll()
+        saveDeletedBin()
+        WatchSessionManager.shared.pushFullDataToWatch() // 同步到手表
     }
     
     // iCloud 记忆相关代码已移除 — 备份/恢复走 R2 (v1.12)
@@ -1758,46 +1763,60 @@ class ChatViewModel: ObservableObject {
             for i in memories.indices {
                 if let existingEmb = memories[i].embedding {
                     let sim = cosineSimilarity(newEmb, existingEmb)
-                    if sim > 0.85 {
-                        // 语义高度相似，更新内容而非重复添加
-                        print("🔄 语义去重：\(trimmed) ≈ \(memories[i].content)（相似度 \(String(format: "%.2f", sim))）")
-                        memories[i].content = trimmed  // 用更新的表述替换
+                    // v2.8: 去重阈值——提高标准，防止微弱相关的记忆被错误合并
+                    let dedupThreshold: Float = importance >= 0.9 ? 0.85 : 0.80
+                    if sim > dedupThreshold {
+                        let existingContent = memories[i].content
+                        print("🔄 语义相似：\(trimmed) ≈ \(existingContent)（相似度 \(String(format: "%.2f", sim))）")
+                        
+                        // v2.5: 用辅助模型合并记忆（异步），先立即更新以防丢失
                         memories[i].lastUpdated = Date()
                         if memories[i].type == .shortTerm && type == .longTerm {
                             memories[i].type = .longTerm
                             memories[i].expiration = nil
                         }
                         if importance > memories[i].importance { memories[i].importance = importance }
+                        
+                        let mergeIdx = i
+                        Task { [weak self] in
+                            guard let self = self else { return }
+                            if let merged = await self.mergeMemoriesWithLLM(existing: existingContent, new: trimmed) {
+                                await MainActor.run {
+                                    guard mergeIdx < self.memories.count,
+                                          self.memories[mergeIdx].content == existingContent else {
+                                        // 索引已变动，安全退出
+                                        return
+                                    }
+                                    self.memories[mergeIdx].content = merged
+                                    self.saveMemories()  // v2.5: 立即保存合并结果，不等 embedding
+                                    print("✅ 记忆合并：\(existingContent) + \(trimmed) → \(merged)")
+                                    // 重新生成合并后的向量（异步，不阻塞保存）
+                                    Task {
+                                        if let (embConfig, embModel) = self.getEmbeddingProvider(),
+                                           let newEmb = try? await self.service.fetchEmbedding(text: merged, modelId: embModel, config: embConfig) {
+                                            await MainActor.run {
+                                                if mergeIdx < self.memories.count {
+                                                    self.memories[mergeIdx].embedding = newEmb
+                                                    self.saveMemories()
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                // LLM 合并失败，回退：直接用新内容覆盖
+                                await MainActor.run {
+                                    if mergeIdx < self.memories.count {
+                                        self.memories[mergeIdx].content = trimmed
+                                        self.memories[mergeIdx].embedding = newEmb
+                                        self.saveMemories()
+                                    }
+                                }
+                            }
+                        }
                         saveMemories()
                         return
                     }
-                }
-            }
-        }
-        
-        // v2.0: 模糊文本去重 + 子集检测 — 当向量不可用时，用关键词重叠度检测相似记忆
-        let newTokens = Set(trimmed.components(separatedBy: CharacterSet.alphanumerics.union(.init(charactersIn: "\u{4e00}"..."\u{9fff}")).inverted).filter { $0.count > 1 })
-        if newTokens.count >= 2 {
-            for i in memories.indices {
-                let existTokens = Set(memories[i].content.components(separatedBy: CharacterSet.alphanumerics.union(.init(charactersIn: "\u{4e00}"..."\u{9fff}")).inverted).filter { $0.count > 1 })
-                guard !existTokens.isEmpty else { continue }
-                let intersection = newTokens.intersection(existTokens)
-                let union = newTokens.union(existTokens)
-                let jaccard = Float(intersection.count) / Float(union.count)
-                // 检测1: Jaccard 相似度超阈值
-                // 检测2: 已有记忆的关键词是新记忆的子集（即新记忆是多条旧记忆的合并）
-                let isSubset = existTokens.isSubset(of: newTokens)
-                if jaccard > 0.6 || (isSubset && existTokens.count >= 2) {
-                    print("🔄 模糊去重：\(trimmed) ≈ \(memories[i].content)（Jaccard \(String(format: "%.2f", jaccard)), subset=\(isSubset)）")
-                    memories[i].content = trimmed
-                    memories[i].lastUpdated = Date()
-                    if memories[i].type == .shortTerm && type == .longTerm {
-                        memories[i].type = .longTerm
-                        memories[i].expiration = nil
-                    }
-                    if importance > memories[i].importance { memories[i].importance = importance }
-                    saveMemories()
-                    return
                 }
             }
         }
@@ -1821,20 +1840,13 @@ class ChatViewModel: ObservableObject {
         )
         memories.insert(item, at: 0)
         
-        // v1.8: 智能淘汰 — 200 条上限仅计长期记忆，临时记忆不占名额
-        // 1. 先清理过期临时记忆
+        // v1.8 智能淘汰：只清理过期临时记忆，长期记忆无上限
+        // 1. 清理过期临时记忆
         memories.removeAll { $0.type == .shortTerm && $0.isExpired }
         
-        // 2. 长期记忆超过上限时，拒绝新增（不自动删）
-        let longTermCount = memories.filter { $0.type == .longTerm }.count
-        if longTermCount > maxMemoryCount && type == .longTerm {
-            print("⚠️ 长期记忆已满（\(maxMemoryCount)条），无法添加")
-            memories.removeFirst() // 移除刚插入的
-        }
-        
-        // 3. 临时记忆超 200 条时，淘汰最旧的临时记忆
+        // 2. 临时记忆超 500 条时，淘汰最旧的临时记忆
         let shortTermMems = memories.enumerated().filter { $0.element.type == .shortTerm && !$0.element.isExpired }
-        if shortTermMems.count > 200 {
+        if shortTermMems.count > 500 {
             if let oldestIdx = shortTermMems
                 .min(by: { ($0.element.lastUpdated ?? $0.element.createdAt) < ($1.element.lastUpdated ?? $1.element.createdAt) })
                 .map({ $0.offset }) {
@@ -1845,68 +1857,58 @@ class ChatViewModel: ObservableObject {
     }
     
     func deleteMemory(id: UUID) {
-        if let idx = memories.firstIndex(where: { $0.id == id }) {
-            var item = memories[idx]
-            item.deletedAt = Date()
-            memoryTrash.insert(item, at: 0)
-            memories.remove(at: idx)
-            saveMemories()
-            saveMemoryTrash()
-            WatchSessionManager.shared.pushFullDataToPhone() // 同步到 iPhone
-        }
+        memories.removeAll { $0.id == id }
+        saveMemories()
+        WatchSessionManager.shared.pushFullDataToWatch() // BUG-1 fix: sync deletion to Watch
     }
     
     func deleteMemories(at offsets: IndexSet) {
-        let deleted = offsets.map { memories[$0] }
         memories.remove(atOffsets: offsets)
-        let now = Date()
-        for var item in deleted {
-            item.deletedAt = now
-            memoryTrash.insert(item, at: 0)
-        }
         saveMemories()
-        saveMemoryTrash()
-        WatchSessionManager.shared.pushFullDataToPhone() // 同步到 iPhone
+        WatchSessionManager.shared.pushFullDataToWatch() // BUG-1 fix: sync deletion to Watch
     }
     
     func clearAllMemories() {
-        let now = Date()
-        for var item in memories {
-            item.deletedAt = now
-            memoryTrash.insert(item, at: 0)
-        }
         memories.removeAll()
         saveMemories()
-        saveMemoryTrash()
-        WatchSessionManager.shared.pushFullDataToPhone() // 同步到 iPhone
+        WatchSessionManager.shared.pushFullDataToWatch() // BUG-1 fix: sync deletion to Watch
     }
+    
+    // v2.5: 用辅助模型合并相似记忆
+    func mergeMemoriesWithLLM(existing: String, new: String) async -> String? {
+        let targetModelID = helperGlobalModelID.isEmpty ? selectedGlobalModelID : helperGlobalModelID
+        let components = targetModelID.split(separator: "|")
+        guard components.count == 2,
+              let providerID = UUID(uuidString: String(components[0])),
+              let provider = providers.first(where: { $0.id == providerID }),
+              !provider.apiKey.isEmpty else { return nil }
+        let modelID = String(components[1])
+        
+        let mergePrompt = """
+        将以下两条关于同一用户的记忆合并为一条，保留所有不重复的信息。
+        要求：第三人称，≤30字，不要编号，不要引号，直接输出合并后的内容。
 
-    // v2.1: 从回收站恢复记忆
-    func restoreMemoryFromTrash(at index: Int) {
-        guard index < memoryTrash.count else { return }
-        var item = memoryTrash.remove(at: index)
-        item.deletedAt = nil
-        memories.insert(item, at: 0)
-        saveMemories()
-        saveMemoryTrash()
-        WatchSessionManager.shared.pushFullDataToPhone()
+        记忆1：\(existing)
+        记忆2：\(new)
+        """
+        
+        let msg = ChatMessage(role: .user, text: mergePrompt)
+        let stream = service.streamChat(messages: [msg], modelId: modelID, config: provider, temperature: 0.2)
+        
+        var result = ""
+        do {
+            for try await chunk in stream { result += chunk }
+        } catch {
+            print("⚠️ 记忆合并失败: \(error.localizedDescription)")
+            return nil
+        }
+        
+        let merged = result.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: "\"", with: "")
+        guard !merged.isEmpty, merged.count <= 50 else { return nil }
+        return merged
     }
-
-    // v2.1: 从回收站永久删除（不可恢复）
-    func permanentlyDeleteFromTrash(at index: Int) {
-        guard index < memoryTrash.count else { return }
-        memoryTrash.remove(at: index)
-        saveMemoryTrash()
-        WatchSessionManager.shared.pushFullDataToPhone()
-    }
-
-    // v2.1: 清空回收站
-    func emptyMemoryTrash() {
-        memoryTrash.removeAll()
-        saveMemoryTrash()
-        WatchSessionManager.shared.pushFullDataToPhone()
-    }
-
+    
     /// v1.8: 利用 LLM 从当前对话中提取记忆（双轨模式 + 反幻觉）
     func extractMemories() async {
         guard memoryEnabled else { return }
@@ -1914,80 +1916,51 @@ class ChatViewModel: ObservableObject {
         let msgs = currentMessages
         guard msgs.count >= 2 else { return }
         
-        // 取最近 6 条用户消息（只分析用户说的话，不看 AI 回复）
-        // 根因修复：AI 回复中引用已有记忆、提建议等内容不应被提取模型看到
-        let recentUserMsgs = msgs.suffix(min(12, msgs.count))
-            .filter { $0.role == .user }
-            .suffix(6)
-        let conversationText = recentUserMsgs.map { "用户: \($0.text)" }.joined(separator: "\n")
+        // v2.5: 只传用户消息给提取模型，防止把 AI 说的内容当作用户事实（幻觉）
+        let recentMsgs = msgs.suffix(min(6, msgs.count))
+        let conversationText = recentMsgs.compactMap { msg -> String? in
+            guard msg.role == .user else { return nil }
+            return "用户: \(msg.text)"
+        }.joined(separator: "\n")
         
         guard !conversationText.isEmpty else { return }
         
-        // v2.0: 只分析用户消息，提取用户侧写
-        let dateFormatter = DateFormatter()
-        dateFormatter.dateFormat = "yyyy.M.d"
-        let todayStr = dateFormatter.string(from: Date())
-        
-        var existingMemoryNote = ""
-        if !memories.isEmpty {
-            let existingLines = memories.prefix(30).map { "• \($0.content)" }.joined(separator: "\n")
-            existingMemoryNote = """
-            
-            ━━━ 已有记忆（不要重复） ━━━
-            \(existingLines)
-            以上已记录，不要重复提取。仅当用户更新或纠正了某条时，输出更新版。
-            
-            """
-        }
-        
+        // v1.8: 反幻觉 + 去重侧写 Prompt
         let extractionPrompt = """
-        你是用户侧写分析师。从用户的发言中提取值得长期记住的信息。
+        任务：你是一个用户侧写分析师，从对话中提取用户的真实信息，并识别需要删除的过时信息。
 
-        ━━━ 当前时间 ━━━
-        \(todayStr)
+        ━━━ 绝对禁止 ━━━
+        • 禁止提取 AI 说的任何内容（建议、举例、假设、反问）作为用户事实。
+        • 禁止自行推测或补充信息。
+        • 只有用户亲口说出或明确确认的内容才能提取。
+        • 禁止把"用户要求记住X"作为单独一条——直接记X本身。
+        • 相关联的信息必须合并为一条，绝不拆分。
 
-        ━━━ 提取类别 ━━━
+        ━━━ 合并规则（极重要） ━━━
+        同一个人/事/属性的不同侧面必须合并为一条：
+        ❌ 错误（拆分）：1. 用户今年17岁  2. 用户2009年出生
+        ✅ 正确（合并）：[长期] 用户2009年生，今年17岁
 
-        [临时] 当下的情绪、心情、短期打算（24h后自动失效）
-          → 必须带日期，记录具体原因
-          → 例：[临时] 2026.3.6 心情低落，数学考砸了只有65分
+        ━━━ 删除规则（重要！） ━━━
+        如果用户明确表示某个信息已过时或变化，必须用 [删除] 标记旧信息：
+        例如：
+        用户: 我已经不是学生了，我现在在工作
+        ✅ [删除] 用户是学生
+        ✅ [长期] 用户已工作
 
-        [长期] 用户的身份、事实、关系
-          → 例：[长期] 用户是高二学生 / 用户有个姐姐在读大学
+        用户: 我不喜欢Python了，我现在用Swift
+        ✅ [删除] 用户喜欢Python
+        ✅ [长期] 用户现在使用Swift
 
-        [长期] 用户的喜好、兴趣、习惯
-          → 例：[长期] 用户喜欢看动漫，最近在追《芙莉莲》
+        ━━━ 输出格式 ━━━
+        - [临时] 用户的短期计划或具体的待办事项（24h失效。严禁提取由于对话引起的短暂情感、心理活动、无实质内容的牢骚）
+        - [长期] 身份、习惯、喜好、关系等永久事实
+        - [!] 用户明确要求记住的信息（永久）
+        - [删除] 需要删除的过时信息
 
-        [长期] 用户经历的事件（必须带日期或时间线索）
-          → 例：[长期] 2026.3.1 用户去了东京旅行
-          → 例：[长期] 用户最近在准备高考
+        第三人称，每条≤20字，相关信息合并为一条。无新信息回复"无"。
 
-        [!] 用户明确说"帮我记住"的信息
-          → 例：[!] 用户生日是3月15号
-
-        ━━━ 核心规则 ━━━
-        1. 只提取用户亲口说的，禁止推测
-        2. 同一件事的所有细节必须合并成一条，绝对不要拆成多条
-           例：心情差+原因+当天打算 → 合并为一条 [临时]
-        3. 不要记录"用户要求记住"这个动作，直接记事实
-        4. "今天""昨天""上周"等相对时间 → 转换为具体日期
-        5. 第三人称描述，每条≤40字
-        6. 没有新信息就回复"无"
-
-        ━━━ 示例 ━━━
-        输入：
-        用户: 今天心情好差啊考试没考好
-        用户: 晚上打算吃点好的缓缓
-
-        正确输出：
-        - [临时] \(todayStr) 用户心情差，考试失利，晚上打算吃点好的缓解
-
-        错误输出（拆分了）：
-        - [临时] 用户今天心情差
-        - [临时] 用户考试没考好
-        - [临时] 用户晚上打算吃好的
-        \(existingMemoryNote)
-        ━━━ 用户消息 ━━━
+        对话内容：
         \(conversationText)
         """
         
@@ -2005,41 +1978,52 @@ class ChatViewModel: ObservableObject {
             messages: [extractionMsg],
             modelId: modelID,
             config: provider,
-            temperature: 0.05,  // 极低温度
-            disableReasoning: true
+            temperature: 0.05  // 极低温度
         )
         
         var result = ""
         do {
             for try await chunk in stream {
                 result += chunk
+                // v2.5: 安全阀 — AI 输出超过 2000 字符直接截断，防止无限生成
+                if result.count > 2000 {
+                    print("⚠️ 记忆提取输出超过 2000 字符，截断")
+                    break
+                }
             }
         } catch {
             print("⚠️ 记忆提取失败: \(error.localizedDescription)")
             return
         }
         
-        // v2.1: 即使模型强行输出思考过程（如 Qwen/DeepSeek 等），也通过正则将其移除，确保严格提取
-        var finalResult = result
-        if finalResult.contains("<think>") {
-            finalResult = finalResult.replacingOccurrences(of: "<think>[\\s\\S]*?</think>", with: "", options: .regularExpression)
-            finalResult = finalResult.replacingOccurrences(of: "<think>[\\s\\S]*", with: "", options: .regularExpression)
-        }
-        let trimmed = finalResult.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmed = result.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "无", !trimmed.hasPrefix("无") else { return }
         
         let embProvider = getEmbeddingProvider()
         
-        // v1.8: 解析双轨前缀
-        let lines = trimmed.components(separatedBy: "\n")
+        // v2.5: 解析双轨前缀，安全限制最多处理 20 行
+        let allLines = trimmed.components(separatedBy: "\n")
+        let lines = Array(allLines.prefix(20))
+        if allLines.count > 20 {
+            print("⚠️ 记忆提取输出 \(allLines.count) 行，仅处理前 20 行")
+        }
+        var batchedDeletions: [(content: String, index: Int)] = []  // v2.5: 收集删除，循环结束后一次性提交
+        // BUG-8 fix: 用临时 Set 跟踪本次提取中已处理的记忆（按 content 而非 index）
+        var processedContents: Set<String> = []
+        let maxDeletionsPerExtraction = 3  // v2.5: 每次提取最多删除 3 条
         for line in lines {
             var cleaned = line.trimmingCharacters(in: .whitespacesAndNewlines)
             var memType: MemoryType = .longTerm
             var memExpiration: Date? = nil
             var isHighPriority = false
+            var isDelete = false
             
-            // 解析前缀
-            if cleaned.hasPrefix("[!] ") || cleaned.hasPrefix("- [!] ") {
+            // v2.5: 解析删除前缀
+            if cleaned.hasPrefix("[删除]") || cleaned.hasPrefix("- [删除]") {
+                cleaned = cleaned.replacingOccurrences(of: "[删除]", with: "")
+                cleaned = cleaned.hasPrefix("- ") ? String(cleaned.dropFirst(2)) : cleaned
+                isDelete = true
+            } else if cleaned.hasPrefix("[!] ") || cleaned.hasPrefix("- [!] ") {
                 cleaned = cleaned.replacingOccurrences(of: "[!] ", with: "")
                 cleaned = cleaned.hasPrefix("- ") ? String(cleaned.dropFirst(2)) : cleaned
                 isHighPriority = true
@@ -2048,7 +2032,7 @@ class ChatViewModel: ObservableObject {
                 cleaned = cleaned.replacingOccurrences(of: "[临时]", with: "")
                 cleaned = cleaned.hasPrefix("- ") ? String(cleaned.dropFirst(2)) : cleaned
                 memType = .shortTerm
-                memExpiration = Date().addingTimeInterval(24 * 3600) // 24h 过期
+                memExpiration = Date().addingTimeInterval(24 * 3600)
             } else if cleaned.hasPrefix("[长期]") || cleaned.hasPrefix("- [长期]") {
                 cleaned = cleaned.replacingOccurrences(of: "[长期]", with: "")
                 cleaned = cleaned.hasPrefix("- ") ? String(cleaned.dropFirst(2)) : cleaned
@@ -2060,6 +2044,78 @@ class ChatViewModel: ObservableObject {
             }
             cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleaned.isEmpty, cleaned.count > 2 else { continue }
+            
+            // v2.5: 删除路径 — 用语义匹配找到并软删除对应记忆
+            if isDelete {
+                // v2.5: 安全阀 — 已达删除上限则跳过
+                if batchedDeletions.count >= maxDeletionsPerExtraction {
+                    print("⚠️ 已达最大删除数 \(maxDeletionsPerExtraction)，跳过: \(cleaned)")
+                    continue
+                }
+                var matchedContent: String? = nil
+                
+                // BUG-8 fix: 只记录 content，不记录 index，避免异步期间索引漂移
+                // 优先用向量相似度匹配
+                if let (embConfig, embModel) = embProvider {
+                    if let deleteEmb = try? await service.fetchEmbedding(text: cleaned, modelId: embModel, config: embConfig) {
+                        var bestSim: Float = 0.6
+                        let memoriesSnapshot = await MainActor.run { self.memories }
+                        for mem in memoriesSnapshot {
+                            if let existingEmb = mem.embedding {
+                                let sim = cosineSimilarity(deleteEmb, existingEmb)
+                                if sim > bestSim {
+                                    bestSim = sim
+                                    matchedContent = mem.content
+                                }
+                            }
+                        }
+                        if let c = matchedContent {
+                            print("🗑️ 语义匹配：\(cleaned) ≈ \(c)（相似度 \(String(format: "%.2f", bestSim))）")
+                        }
+                    }
+                }
+                
+                // 备用：文本包含匹配
+                if matchedContent == nil {
+                    let lowered = cleaned.lowercased()
+                    matchedContent = await MainActor.run {
+                        self.memories.first(where: { $0.content.lowercased().contains(lowered) || lowered.contains($0.content.lowercased()) })?.content
+                    }
+                    if let c = matchedContent {
+                        print("🗑️ 文本匹配：\(cleaned) ≈ \(c)")
+                    }
+                }
+                
+                // 跳过本次提取中已处理的记忆
+                if let c = matchedContent, processedContents.contains(c) {
+                    print("⚠️ 跳过重复删除: \(c.prefix(30))")
+                    continue
+                }
+                if let c = matchedContent { processedContents.insert(c) }
+                
+                if let content = matchedContent {
+                    // BUG-8 fix: 用 content 匹配而非 index，避免异步执行期间索引漂移
+                    // processedContents 已在主循环中按 content 去重，不需要额外的 index 集合
+                    await MainActor.run {
+                        guard let currentIdx = self.memories.firstIndex(where: { $0.content == content }) else {
+                            print("⚠️ 删除时记忆已不存在: \(content.prefix(30))")
+                            return
+                        }
+                        if self.memoryDeleteConfirm {
+                            batchedDeletions.append((content: content, index: currentIdx))
+                            print("⏳ 待确认删除：\(content)")
+                        } else {
+                            self.softDeleteMemory(at: currentIdx)
+                            var activity = self.lastMemoryActivity ?? MemoryActivity()
+                            activity.deletedMemories.append(content)
+                            self.lastMemoryActivity = activity
+                        }
+                    }
+                } else {
+                    print("⚠️ 删除失败：找不到与 '\(cleaned.prefix(50))' 匹配的记忆")
+                }
+                continue
+            }
             
             // 生成向量嵌入
             var emb: [Float]? = nil
@@ -2073,6 +2129,24 @@ class ChatViewModel: ObservableObject {
             
             await MainActor.run {
                 addMemory(cleaned, embedding: emb, importance: isHighPriority ? 0.9 : 0.5, type: memType, expiration: memExpiration)
+                // v2.4: 跟踪新增的记忆
+                var activity = self.lastMemoryActivity ?? MemoryActivity()
+                activity.addedMemories.append(cleaned)
+                self.lastMemoryActivity = activity
+            }
+        }
+        
+        // v2.5: 批量提交所有待确认删除（只触发一次弹窗）
+        if !batchedDeletions.isEmpty {
+            await MainActor.run {
+                self.pendingMemoryDeletions = batchedDeletions
+            }
+        }
+        
+        // BUG-10 fix: 新增记忆后推送到 Watch
+        await MainActor.run {
+            if !WatchSessionManager.shared.isSyncingFromRemote {
+                WatchSessionManager.shared.pushFullDataToWatch()
             }
         }
         
@@ -2262,6 +2336,61 @@ class ChatViewModel: ObservableObject {
         }
     }
     
+    /// v2.5: 提取搜索关键词 (辅助模型)
+    private func extractSearchQuery(from text: String, context: [ChatMessage] = []) async -> String {
+        let cleanText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanText.count <= 10 {
+            return cleanText
+        }
+        
+        let targetModelID = helperGlobalModelID.isEmpty ? selectedGlobalModelID : helperGlobalModelID
+        let components = targetModelID.split(separator: "|")
+        guard components.count == 2,
+              let providerID = UUID(uuidString: String(components[0])),
+              let provider = providers.first(where: { $0.id == providerID }),
+              !provider.apiKey.isEmpty else { return cleanText }
+        let modelID = String(components[1])
+        
+        let prompt = """
+        【前置辅助模型 Prompt 优化版】
+        你是一个专业的搜索引擎 Query 重写专家与意图识别专家。你的任务是判断用户的自然语言是否需要进行全网搜索，并将需要搜索的内容转化为最容易搜到高质量结果的关键词。
+        **规则：**
+        1. **意图判断（最优先）**：如果用户的提问是日常寒暄（如“你好”）、代码编写/解释、通用常识解释（如“什么是黑洞”、“写诗”等完全不需要联网最新资料的问题），请**直接且唯一地输出：[不需要搜索]**。
+        2. 去除所有口语化废话（如“帮我查一下”、“呢”）。
+        3. **实体展开（关键）**：如果用户使用了模糊的集合名词（如“各家”、“主流”、“大厂”），你必须利用你的常识，将其展开为具体的头部企业或产品名称。例如，遇到“各家大模型”，请替换为“OpenAI 谷歌 Anthropic 阿里 百度 字节 大模型”。
+        4. 仅输出最终的搜索词或“[不需要搜索]”，绝对不要包含任何其他解释性文字。
+
+        用户自然语言：
+        \(cleanText.prefix(500))
+        """
+        let msg = ChatMessage(role: .user, text: prompt)
+        
+        do {
+            let stream = service.streamChat(
+                messages: [msg],
+                modelId: modelID,
+                config: provider,
+                temperature: 0.1
+            )
+            var result = ""
+            for try await chunk in stream {
+                result += chunk
+                if result.count > 150 { break } // v2.9: 增加实体展开所需的安全截断长度
+            }
+            let keyword = result.trimmingCharacters(in: .whitespacesAndNewlines)
+                .replacingOccurrences(of: "\"", with: "")
+                .replacingOccurrences(of: "。", with: "")
+                .replacingOccurrences(of: "！", with: "")
+                .replacingOccurrences(of: "？", with: "")
+            
+            print("🧠 意图抽取: [\(cleanText.prefix(20))] -> [\(keyword)]")
+            return keyword.isEmpty ? cleanText : keyword
+        } catch {
+            print("⚠️ 意图抽取失败: \(error.localizedDescription)")
+            return cleanText
+        }
+    }
+    
     /// 重新生成最后一条回复
     func regenerateLastMessage() {
         guard !isLoading else { return }
@@ -2289,133 +2418,47 @@ class ChatViewModel: ObservableObject {
         // v1.6: 初始化流式输出状态
         streamingText = ""
         streamingThinkingText = ""
+        streamingBlocks = []            // v2.5: 修复重试时重复显示上一次回复
+        streamingThinkingBlocks = []    // v2.5: 同上
         
         msgs.append(ChatMessage(role: .assistant, text: ""))
         updateCurrentSessionMessagesInMemory(msgs) // 只更新内存，不写磁盘
         let botIndex = msgs.count - 1
         
+        let localSearchEnabled = isSearchContextEnabled && webSearchEnabled
+        let localQuery = lastUserMsg.text
+        
         currentTask = Task {
-            let history = await buildHistoryWithContext(from: msgs)
-            var responseText = ""
-            var thinkingText = ""
-            
-            // v1.12: 统一状态机解析器（与 sendMessage 一致）
-            var isThinking = false
-            var pendingBuffer = ""
-            
-            // v1.12: 统一节流间隔 150ms
-            var lastUIUpdateTime = Date()
-            let uiUpdateInterval: TimeInterval = 0.15
-            var pendingUpdate = false
-            
-            do {
-                let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
-                for try await chunk in stream {
-                    if Task.isCancelled { break }
-                    
-                    // 2. 追加到缓冲
-                    pendingBuffer += chunk
-                    
-                    // 3. 状态机解析循环
-                    while true {
-                        let tag = isThinking ? "</think>" : "<think>"
-                        if let range = pendingBuffer.range(of: tag, options: .caseInsensitive) {
-                            let contentBefore = String(pendingBuffer[..<range.lowerBound])
-                            if isThinking {
-                                thinkingText += contentBefore
-                                isThinking = false
-                            } else {
-                                responseText += contentBefore
-                                isThinking = true
-                            }
-                            pendingBuffer = String(pendingBuffer[range.upperBound...])
-                        } else {
-                            let keepLength = tag.count - 1
-                            if pendingBuffer.count > keepLength {
-                                let safeIndex = pendingBuffer.index(pendingBuffer.endIndex, offsetBy: -keepLength)
-                                let safeContent = String(pendingBuffer[..<safeIndex])
-                                if isThinking { thinkingText += safeContent }
-                                else { responseText += safeContent }
-                                pendingBuffer = String(pendingBuffer[safeIndex...])
-                            }
-                            break
-                        }
+            var searchContext: String? = nil
+            if localSearchEnabled, !webSearchWorkerURL.isEmpty {
+                await MainActor.run { self.streamingText = "🧠 提取搜索关键词..." }
+                let extractQuery = await self.extractSearchQuery(from: localQuery)
+                if extractQuery.contains("[不需要搜索]") {
+                    print("🧠 意图判定：无搜索必要，跳过联网检索。")
+                    await MainActor.run { self.streamingText = "" }
+                } else {
+                    await MainActor.run { self.streamingText = "🔍 正在检索网络: \(extractQuery)..." }
+                    print("🔍 重试检索: original=\(localQuery), extracted=\(extractQuery), url=\(webSearchWorkerURL), hasAuth=\(!webSearchAuthKey.isEmpty)")
+                    do {
+                        let results = try await service.fetchWebSearchResults(query: extractQuery, workerURL: webSearchWorkerURL, authKey: webSearchAuthKey)
+                        searchContext = results
+                        print("✅ 重试检索完成")
+                        await MainActor.run { self.streamingText = "" }
+                    } catch {
+                        print("⚠️ Web Search Failed: \(error)")
+                        await MainActor.run { self.streamingText = "" }
                     }
-                    
-                    // 4. 节流更新 streamingText
-                    let now = Date()
-                    if now.timeIntervalSince(lastUIUpdateTime) >= uiUpdateInterval {
-                        let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        streamingText = finalContent
-                        if thinkingMode != .disabled {
-                            streamingThinkingText = thinkingText
-                        }
-                        lastUIUpdateTime = now
-                        pendingUpdate = false
-                    } else {
-                        pendingUpdate = true
-                    }
-                }
-                
-                // 循环结束，处理剩余 Buffer
-                if !pendingBuffer.isEmpty {
-                    if isThinking { thinkingText += pendingBuffer }
-                    else { responseText += pendingBuffer }
-                }
-                
-                // 流式完成 — 一次性写入 sessions
-                let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-                let finalThinking = thinkingText
-                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                    currentMsgs[botIndex].text = finalContent
-                    if thinkingMode == .disabled {
-                        currentMsgs[botIndex].thinkingContent = nil
-                    } else {
-                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                    }
-                    streamingText = ""
-                    streamingThinkingText = ""
-                    updateCurrentSessionMessagesInMemory(currentMsgs)
-                }
-                saveSessions()
-                if enableHapticFeedback { WKInterfaceDevice.current().play(.success) } // v1.12: 成功震动
-                
-                // v1.8: 重新生成后也提取记忆
-                if self.memoryEnabled {
-                    Task { [weak self] in
-                        await self?.extractMemories()
-                    }
-                }
-                
-            } catch {
-                streamingText = ""
-                streamingThinkingText = ""
-                
-                if Task.isCancelled {
-                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-                        currentMsgs[botIndex].text = finalContent.isEmpty ? "" : finalContent + "\n[已停止]"
-                        if thinkingMode != .disabled && !thinkingText.isEmpty {
-                            currentMsgs[botIndex].thinkingContent = thinkingText
-                        }
-                        updateCurrentSessionMessagesInMemory(currentMsgs)
-                    }
-                    saveSessions()
-                    if enableHapticFeedback { WKInterfaceDevice.current().play(.directionDown) }
-                } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                    let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-                    if finalContent.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
-                    else { currentMsgs[botIndex].text = finalContent + "\n[中断]" }
-                    if thinkingMode != .disabled && !thinkingText.isEmpty {
-                        currentMsgs[botIndex].thinkingContent = thinkingText
-                    }
-                    updateCurrentSessionMessagesInMemory(currentMsgs)
-                    saveSessions()
-                    if enableHapticFeedback { WKInterfaceDevice.current().play(.failure) }
                 }
             }
-            isLoading = false
-            currentTask = nil
+            
+            let history = await buildHistoryWithContext(from: msgs, searchContext: searchContext)
+            await streamChatResponse(
+                history: history,
+                modelID: modelID,
+                provider: provider,
+                botIndex: botIndex
+            )
+            
         }
     }
     
@@ -2472,15 +2515,18 @@ class ChatViewModel: ObservableObject {
         }
         
         // 4. 兜底/旧逻辑
-        if lower.contains("deepseek-r1") || 
-           lower.contains("deepseek-reasoner") {
+        if lower.contains("deepseek-r1") ||
+           lower.contains("deepseek-reasoner") ||
+           lower.contains("thinking") || // e.g. gemini-2.5-flash-thinking
+           lower.contains("gemini-2.5-pro") || // v1.13: Gemini 2.5 Pro 及以上支持思考
+           lower.contains("gemini-3") {        // v1.13: 囊括 gemini-3, 3.1 甚至全系 3.x
             return .supported
         }
         
         // v1.12: 精确匹配不支持思考的模型（避免误判 o1/o3/claude-3.5-sonnet 等）
+        // v1.13: 移除了对 Gemini 的全盘否定，因为 Gemini 2.0/3.0 Pro 原生支持思考
         if lower.contains("gpt-3") ||
            (lower.contains("gpt-4") && !lower.contains("4o")) || // gpt-4-turbo 不支持，gpt-4o 交给 ModelRegistry
-           lower.contains("gemini") ||
            lower.contains("deepseek-chat") || // V3 非 R1
            lower.contains("deepseek-v3") {
             return .unsupported
@@ -2604,28 +2650,89 @@ class ChatViewModel: ObservableObject {
         updateCurrentSessionMessages(msgs)
         let botIndex = msgs.count - 1
         
+        let localSearchEnabled = isSearchContextEnabled && webSearchEnabled
+        let localQuery = editingText
+        
         currentTask = Task {
-            let history = await buildHistoryWithContext(from: msgs)
-            var responseText = ""
-            var thinkingText = ""
-            var firstTokenReceived = false
-            var localFirstTokenTime: Date? = nil // v1.8: 本地暂存首 Token 时间
+            var searchContext: String? = nil
+            if localSearchEnabled, !webSearchWorkerURL.isEmpty {
+                await MainActor.run { self.streamingText = "🧠 提取搜索关键词..." }
+                let extractQuery = await self.extractSearchQuery(from: localQuery)
+                if extractQuery.contains("[不需要搜索]") {
+                    print("🧠 意图判定：无搜索必要，跳过联网检索。")
+                    await MainActor.run { self.streamingText = "" }
+                } else {
+                    await MainActor.run { self.streamingText = "🔍 正在检索网络: \(extractQuery)..." }
+                    print("🔍 编辑重试检索: original=\(localQuery), extracted=\(extractQuery), url=\(webSearchWorkerURL), hasAuth=\(!webSearchAuthKey.isEmpty)")
+                    do {
+                        let results = try await service.fetchWebSearchResults(query: extractQuery, workerURL: webSearchWorkerURL, authKey: webSearchAuthKey)
+                        searchContext = results
+                        print("✅ 编辑检索完成")
+                        await MainActor.run { self.streamingText = "" }
+                    } catch {
+                        print("⚠️ Web Search Failed: \(error)")
+                        await MainActor.run { self.streamingText = "" }
+                    }
+                }
+            }
             
-            // v1.8.1: 流式解析状态机 (优化性能)
-            var isThinking = false
-            var pendingBuffer = ""
+            let history = await buildHistoryWithContext(from: msgs, searchContext: searchContext)
+            await streamChatResponse(
+                history: history,
+                modelID: modelID,
+                provider: provider,
+                botIndex: botIndex
+            )
             
-            // v1.12: 统一节流间隔 150ms（与 sendMessage 一致）
-            var lastUIUpdateTime = Date()
-            let uiUpdateInterval: TimeInterval = 0.15
-            var pendingUpdate = false
+        }
+    }
+    
+    // MARK: - 通用流式响应逻辑 (v2.2)
+    private func streamChatResponse(
+        history: [ChatMessage],
+        modelID: String,
+        provider: ProviderConfig,
+        botIndex: Int
+    ) async {
+        var responseText = ""
+        var thinkingText = ""
+        var firstTokenReceived = false
+        var localFirstTokenTime: Date? = nil
+        
+        // 状态机变量
+        var isThinking = false
+        var pendingBuffer = ""
+        var hasSeenFirstThink = false
+        var responseTextBeforeThink = ""
+        
+        var lastUIUpdateTime = Date()
+        var uiUpdateInterval: TimeInterval = 0.05 // 动态调节：初始 50ms，实现丝滑流畅的逐字滚动
+        var retryCount = 0
+        
+        while true {
+            // 重试前重置状态
+            responseText = ""
+            thinkingText = ""
+            isThinking = false
+            pendingBuffer = ""
+            firstTokenReceived = false
+            hasSeenFirstThink = false
+            responseTextBeforeThink = ""
             
             do {
+                // 重试 UI 提示
+                if retryCount > 0 {
+                    await MainActor.run {
+                        self.streamingText = "正在重试 (\(retryCount)/\(maxRetries))..."
+                        self.streamingThinkingText = ""
+                    }
+                }
+                
                 let stream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
                 for try await chunk in stream {
                     if Task.isCancelled { break }
                     
-                    // v1.8: 记录首 Token 时间
+                    // 记录首 Token
                     if !firstTokenReceived {
                         firstTokenReceived = true
                         localFirstTokenTime = Date()
@@ -2635,48 +2742,53 @@ class ChatViewModel: ObservableObject {
                         }
                     }
                     
-                    // 2. 追加到缓冲
+                    // 1. 追加缓冲
                     pendingBuffer += chunk
                     
-                    // 3. 状态机解析
+                    // 3. 状态机解析：基于不可逆状态的标记点引擎
                     let startTag = "<think>"
                     let endTag = "</think>"
                     
                     while true {
-                        // 动态计算当前是否在 Markdown 代码块中 (计算 ``` 的对数)
-                        let totalFences = (responseText + pendingBuffer).components(separatedBy: "```").count - 1
-                        let isInCodeBlock = totalFences % 2 != 0
-                        // 只有处于外部正文且在代码块内时，才免疫 `<think>` 标签拦截（保护演示代码的效果）。如果是寻找 </think> 则无视代码块。
-                        let ignoreTag = !isThinking && isInCodeBlock
+                        // 寻找的目标：如果还没完成思考闭环且不在思考中，找 startTag。
+                        // 如果在思考中，找 endTag。
+                        // 如果已经完成思考闭环 (hasSeenFirstThink == true && !isThinking)，就不再找任何 Tag。
+                        let currentTag: String? = {
+                            if isThinking { return endTag }
+                            if !hasSeenFirstThink { return startTag }
+                            return nil
+                        }()
                         
-                        let currentTag = isThinking ? endTag : startTag
-                        
-                        if !ignoreTag, let range = pendingBuffer.range(of: currentTag, options: .caseInsensitive) {
-                            // 找到完整标签
+                        if let target = currentTag, let range = pendingBuffer.range(of: target, options: .caseInsensitive) {
+                            // 找到了目标标签
                             let textBefore = String(pendingBuffer[..<range.lowerBound])
+                            
                             if isThinking {
+                                // 闭合思考区
                                 thinkingText += textBefore
                                 isThinking = false
-                                // 移除原先的 thinkingBlockClosed 封印：允许多次 <think> 出现合并折叠
+                                hasSeenFirstThink = true // 永久锁定！之后不管是正文探讨格式还是引用代码里的 <think>，通通当作文本！
+                                
+                                responseTextBeforeThink = responseText
+                                responseText = ""
                             } else {
+                                // 开启首次思考区
                                 responseText += textBefore
                                 isThinking = true
                             }
                             
                             pendingBuffer = String(pendingBuffer[range.upperBound...])
                         } else {
-                            // 没找到完整标签，检查缓冲末尾是否有当前标签的前缀
+                            // 没找到完整标签，检查缓冲末尾是否有当前寻找标签的前缀
                             var safeLength = pendingBuffer.count
                             
-                            if !ignoreTag {
-                                // 暴力检查末尾是否有当前标签的前缀（例如 "<", "<t", "<th", etc.）
-                                let maxPrefixLen = currentTag.count - 1
+                            if let target = currentTag {
+                                let maxPrefixLen = target.count - 1
                                 if maxPrefixLen > 0 {
                                     for i in (1...maxPrefixLen).reversed() { // 从长到短检查
                                         if pendingBuffer.count >= i {
                                             let suffix = String(pendingBuffer.suffix(i))
-                                            if currentTag.lowercased().hasPrefix(suffix.lowercased()) {
-                                                // 找到了前缀，保留在 buffer 里
+                                            if target.lowercased().hasPrefix(suffix.lowercased()) {
                                                 safeLength = pendingBuffer.count - i
                                                 break
                                             }
@@ -2695,85 +2807,297 @@ class ChatViewModel: ObservableObject {
                         }
                     }
                     
-                    // 4. 节流 UI 更新（流式输出时禁用动画，减少Watch卡顿）
+                    // 4. 节流动态 UI 更新 (极其激进的 OOM 防护)
                     let now = Date()
+                    let currentLength = responseText.count + thinkingText.count
+                    
+                    // 动态调整刷新率：文本越长，界面刷新越慢，降低 CPU 和内存拷贝堆积
+                    if currentLength > 50_000 {
+                        uiUpdateInterval = 1.0 // 超过 5 万字，1 秒刷新一次
+                    } else if currentLength > 20_000 {
+                        uiUpdateInterval = 0.5 // 超过 2 万字，0.5 秒刷新
+                    } else if currentLength > 5_000 {
+                        uiUpdateInterval = 0.25 // 5 千字，0.25 秒
+                    }
+                    
                     if now.timeIntervalSince(lastUIUpdateTime) >= uiUpdateInterval {
-                        let finalThinking = thinkingText
-                        var finalContent = responseText
-                        finalContent = finalContent.trimmingCharacters(in: .whitespacesAndNewlines)
+                        var totalResponseText = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
                         
-                        // v1.8.4: 流式输出时禁用动画，只做数据更新
-                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                            currentMsgs[botIndex].text = finalContent
-                            if thinkingMode == .disabled {
-                                currentMsgs[botIndex].thinkingContent = nil
-                            } else {
-                                currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
+                        let parsedBlocks = totalResponseText.splitIntoMarkdownBlocks()
+                        // v2.4: Filter out empty/whitespace-only thinking blocks to prevent empty "思考过程" frame
+                        let rawThinkingBlocks = thinkingMode != .disabled ? thinkingText.splitIntoMarkdownBlocks() : []
+                        let parsedThinkingBlocks = rawThinkingBlocks.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+                        
+                        await MainActor.run {
+                            self.streamingText = totalResponseText
+                            self.streamingBlocks = parsedBlocks
+                            if self.thinkingMode != .disabled {
+                                self.streamingThinkingText = thinkingText
+                                self.streamingThinkingBlocks = parsedThinkingBlocks
                             }
-                            updateCurrentSessionMessagesInMemory(currentMsgs)
                         }
+                        
+                        // 不再实时往 messages 里塞（极耗内存，导致 ScrollView 崩溃），仅用 streaming 承载
                         lastUIUpdateTime = now
-                        pendingUpdate = false
-                    } else {
-                        pendingUpdate = true
                     }
                 }
                 
-                // 结束处理剩余 Buffer
-                if !pendingBuffer.isEmpty {
-                    if isThinking { thinkingText += pendingBuffer }
-                    else { responseText += pendingBuffer }
-                }
-                
-                // v1.12: 完成记录
-                let finalThinking = thinkingText
-                let finalContent = responseText.trimmingCharacters(in: .whitespacesAndNewlines)
-                
-                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                    currentMsgs[botIndex].text = finalContent
-                    if thinkingMode == .disabled {
-                        currentMsgs[botIndex].thinkingContent = nil
-                    } else {
-                        currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
-                    }
-                    currentMsgs[botIndex].completeTime = Date()
-                    if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
-                    updateCurrentSessionMessagesInMemory(currentMsgs)
-                }
-                
-                saveSessions() // 最终保存
-                if enableHapticFeedback { WKInterfaceDevice.current().play(.success) }
-                
-                // v1.8: 编辑重发后也提取记忆
-                if self.memoryEnabled {
-                    Task { [weak self] in
-                        await self?.extractMemories()
-                    }
-                }
+                // 成功流式结束
+                break
                 
             } catch {
                 if Task.isCancelled {
-                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                        if !currentMsgs[botIndex].text.isEmpty {
-                            currentMsgs[botIndex].text += "\n[已停止]"
-                        }
-                        if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
-                        updateCurrentSessionMessagesInMemory(currentMsgs)
+                     await MainActor.run {
+                         self.streamingText = ""
+                         self.streamingThinkingText = ""
+                         self.streamingBlocks = []
+                         self.streamingThinkingBlocks = []
+                     }
+                     
+                     if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                         // 刷新还在缓冲区的尾部残余 Token，防止“停止”瞬间文段回缩
+                         if isThinking { thinkingText += pendingBuffer }
+                         else { responseText += pendingBuffer }
+                         
+                         let finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
+                         currentMsgs[botIndex].text = finalContent.isEmpty ? "" : finalContent + "\n[已停止]"
+                         if thinkingMode != .disabled && !thinkingText.isEmpty {
+                             currentMsgs[botIndex].thinkingContent = thinkingText
+                         }
+                         updateCurrentSessionMessagesInMemory(currentMsgs)
+                     }
+                     saveSessions()
+                     if enableHapticFeedback {
+                         #if os(watchOS)
+                         WKInterfaceDevice.current().play(.directionDown)
+                         #else
+                         UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                         #endif
+                     }
+                     await MainActor.run {
+                         self.isLoading = false
+                         self.currentTask = nil
+                     }
+                     return
+                }
+                
+                print("Stream failed: \(error)")
+                
+                if autoRetryEnabled && retryCount < maxRetries {
+                    retryCount += 1
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    continue
+                }
+                
+                // 最终失败
+                await MainActor.run {
+                    self.streamingText = ""
+                    self.streamingThinkingText = ""
+                }
+                
+                if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                     let finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
+                     
+                     var errorMsg = "❌ \(error.localizedDescription)"
+                     if retryCount > 0 { errorMsg = "❌ [已重试 \(retryCount) 次] \(error.localizedDescription)" }
+                     
+                     if finalContent.isEmpty { currentMsgs[botIndex].text = errorMsg }
+                     else { currentMsgs[botIndex].text = finalContent + "\n[中断] \(error.localizedDescription)" }
+                     
+                     if thinkingMode != .disabled && !thinkingText.isEmpty {
+                         currentMsgs[botIndex].thinkingContent = thinkingText
+                     }
+                     updateCurrentSessionMessagesInMemory(currentMsgs)
+                     saveSessions()
+                     if enableHapticFeedback {
+                         #if os(watchOS)
+                         WKInterfaceDevice.current().play(.failure)
+                         #else
+                         UINotificationFeedbackGenerator().notificationOccurred(.error)
+                         #endif
+                     }
+                }
+                await MainActor.run {
+                    self.isLoading = false
+                    self.currentTask = nil
+                }
+                return
+            }
+        }
+        
+        // 循环结束（成功）：处理剩余 Buffer
+        if !pendingBuffer.isEmpty {
+            if isThinking { thinkingText += pendingBuffer }
+            else { responseText += pendingBuffer }
+        }
+        
+        var finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
+        let finalThinking = thinkingText
+        
+
+        
+        // v2.6: 日志打印完整响应
+        print("\n🤖 AI 完整响应:")
+        print(finalContent.isEmpty ? "[空]" : finalContent)
+        print("--------------------")
+        
+        if !finalThinking.isEmpty {
+            print("\n🧠 AI 思考过程:")
+            print(finalThinking)
+            print("--------------------")
+        }
+        
+        
+        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+            currentMsgs[botIndex].text = finalContent
+            if thinkingMode == .disabled {
+                currentMsgs[botIndex].thinkingContent = nil
+            } else {
+                currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking
+            }
+            currentMsgs[botIndex].completeTime = Date()
+            if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
+            
+            await MainActor.run {
+                self.streamingText = ""
+                self.streamingThinkingText = ""
+            }
+            updateCurrentSessionMessagesInMemory(currentMsgs)
+        }
+        
+        saveSessions()
+        if enableHapticFeedback {
+            #if os(watchOS)
+            WKInterfaceDevice.current().play(.success)
+            #else
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+            #endif
+        }
+        
+        // 记忆提取
+        if self.memoryEnabled {
+            Task { [weak self] in await self?.extractMemories() }
+        }
+        
+        // 生成标题 (仅当是新对话)
+        if let session = self.sessions.first(where: { $0.id == self.currentSessionId }),
+           session.title == "新对话",
+           let firstUserMsg = session.messages.first(where: { $0.role == .user }) {
+            Task { [weak self] in await self?.generateSessionTitle(from: firstUserMsg.text) }
+        }
+        
+        await MainActor.run {
+            self.isLoading = false
+            self.currentTask = nil
+        }
+    }
+    
+    // MARK: - Markdown Helpers
+    
+    /// v2.4: 高性能子串出现次数统计（O(N) 单次扫描，零分配）
+    private func countOccurrences(of needle: String, in haystack: Substring) -> Int {
+        guard !needle.isEmpty else { return 0 }
+        var count = 0
+        var searchRange = haystack.startIndex..<haystack.endIndex
+        while let range = haystack.range(of: needle, range: searchRange) {
+            count += 1
+            searchRange = range.upperBound..<haystack.endIndex
+        }
+        return count
+    }
+}
+
+// MARK: - Markdown Block Splitter
+extension String {
+    // 高级注视点拆分器：保证 ``` 代码块不断行，并且长正常文本按空行拆分，防闪退 OOM
+    // v2.3: 高性能重写，全程使用 Substring 索引操作，避免频繁 String concat 和 components(separatedBy:) 导致的内存暴增
+    func splitIntoMarkdownBlocks() -> [String] {
+        var blocks: [String] = []
+        blocks.reserveCapacity(100)
+        
+        var inCodeBlock = false
+        var blockStart = self.startIndex
+        var currentIndex = self.startIndex
+        var currentBlockCharCount = 0
+        
+        while currentIndex < self.endIndex {
+            let nextNewline = self[currentIndex...].firstIndex(of: "\n") ?? self.endIndex
+            let line = self[currentIndex..<nextNewline]
+            
+            let isCodeFence = line.drop(while: { $0.isWhitespace }).hasPrefix("```")
+            
+            if isCodeFence {
+                if !inCodeBlock {
+                    // 进入代码块之前，把前面的纯文本压入
+                    if currentIndex > blockStart {
+                        let content = self[blockStart..<currentIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !content.isEmpty { blocks.append(String(content)) }
                     }
-                    saveSessions()
-                    if enableHapticFeedback { WKInterfaceDevice.current().play(.directionDown) }
-                } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
-                    if responseText.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
-                    else { currentMsgs[botIndex].text += "\n[中断]" }
-                    if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
-                    updateCurrentSessionMessagesInMemory(currentMsgs)
-                    saveSessions()
-                    if enableHapticFeedback { WKInterfaceDevice.current().play(.failure) }
+                    blockStart = currentIndex // 代码块起点
+                    inCodeBlock = true
+                    currentBlockCharCount = line.count
+                } else {
+                    // 离开代码块
+                    let endIndex = nextNewline
+                    blocks.append(String(self[blockStart..<endIndex]))
+                    
+                    if endIndex < self.endIndex {
+                        blockStart = self.index(after: endIndex) // 下一行起点
+                    } else {
+                        blockStart = endIndex
+                    }
+                    inCodeBlock = false
+                    currentBlockCharCount = 0
+                }
+            } else {
+                if !inCodeBlock {
+                    let isLineEmpty = line.allSatisfy { $0.isWhitespace }
+                    if isLineEmpty {
+                        if currentIndex > blockStart {
+                            let content = self[blockStart..<currentIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !content.isEmpty { blocks.append(String(content)) }
+                        }
+                        blocks.append("") // 空行占位，保持原渲染逻辑兼容
+                        
+                        if nextNewline < self.endIndex {
+                            blockStart = self.index(after: nextNewline)
+                        } else {
+                            blockStart = nextNewline
+                        }
+                        currentBlockCharCount = 0
+                    } else {
+                        currentBlockCharCount += line.count
+                        // 兜底防爆存：普通文本超过1000字符自动强截断
+                        if currentBlockCharCount > 1000 {
+                            let endIndex = nextNewline
+                            blocks.append(String(self[blockStart..<endIndex]))
+                            if nextNewline < self.endIndex {
+                                blockStart = self.index(after: nextNewline)
+                            } else {
+                                blockStart = nextNewline
+                            }
+                            currentBlockCharCount = 0
+                        }
+                    }
                 }
             }
-            isLoading = false
-            currentTask = nil
+            
+            if nextNewline == self.endIndex { break }
+            currentIndex = self.index(after: nextNewline)
         }
+        
+        if blockStart < self.endIndex {
+            let remainder = self[blockStart..<self.endIndex].trimmingCharacters(in: .whitespacesAndNewlines)
+            if !remainder.isEmpty {
+                blocks.append(String(remainder))
+            }
+        }
+        
+        // 过滤首尾多余的空占位符，避免产生大量空白
+        while blocks.last == "" { blocks.removeLast() }
+        while blocks.first == "" { blocks.removeFirst() }
+        
+        return blocks
     }
 }
 
