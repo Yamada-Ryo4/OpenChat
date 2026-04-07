@@ -1,4 +1,4 @@
-# ChatBot for Apple Watch ⌚️🤖
+# OpenChat ⌚️🤖
 
 <p align="center">
   <img src="https://img.shields.io/badge/Platform-watchOS_11.5+-lightgrey.svg?style=flat" alt="Platform watchOS">
@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/License-MIT-yellow.svg?style=flat" alt="License">
 </p>
 
-**ChatBot for Apple Watch** 是一款专为 Apple Watch 打造的终极 AI 伴侣。它不仅仅是一个简单的 API 调用工具，而是一个针对腕上交互进行深度打磨、功能完备的智能终端。
+**OpenChat** 是一款专为 Apple Watch 打造的终极 AI 伴侣。它不仅仅是一个简单的 API 调用工具，而是一个针对腕上交互进行深度打磨、功能完备的智能终端。
 
 无论您是开发者、学生还是 AI 爱好者，都能通过它在手腕上随时随地连接最强大的大语言模型。
 
