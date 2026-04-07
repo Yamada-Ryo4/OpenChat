@@ -3,16 +3,16 @@ import SwiftUI
 // MARK: - Timeline Provider (数据源)
 struct Provider: TimelineProvider {
     func placeholder(in context: Context) -> SimpleEntry {
-        SimpleEntry(date: Date(), lastMessage: "AI: Hello!", title: "ChatBot")
+        SimpleEntry(date: Date(), lastMessage: "AI: Hello!", title: "OpenChat")
     }
     func getSnapshot(in context: Context, completion: @escaping (SimpleEntry) -> Void) {
-        let entry = SimpleEntry(date: Date(), lastMessage: "AI: Weather is nice.", title: "ChatBot")
+        let entry = SimpleEntry(date: Date(), lastMessage: "AI: Weather is nice.", title: "OpenChat")
         completion(entry)
     }
     func getTimeline(in context: Context, completion: @escaping (Timeline<Entry>) -> Void) {
         // 读取共享数据
         var message = "No messages"
-        var title = "ChatBot"
+        var title = "OpenChat"
         
         // 尝试从 AppGroup 或 UserDefaults 读取轻量级数据
         // 使用 "widget_tiny_data" 避免加载整个聊天历史导致 OOM
@@ -62,7 +62,7 @@ struct ChatBotWidgetEntryView : View {
             // 顶部文字: 简洁的一行
             ViewThatFits {
                 Text("💬 \(entry.lastMessage)")
-                Text("ChatBot")
+                Text("OpenChat")
             }
             .widgetURL(URL(string: "chatbot://last"))
             
@@ -113,7 +113,7 @@ struct ChatBotWidget: Widget {
         StaticConfiguration(kind: kind, provider: Provider()) { entry in
             ChatBotWidgetEntryView(entry: entry)
         }
-        .configurationDisplayName("ChatBot")
+        .configurationDisplayName("OpenChat")
         .description("Quick access to your AI assistant.")
         .supportedFamilies([.accessoryRectangular, .accessoryCircular, .accessoryCorner, .accessoryInline])
     }

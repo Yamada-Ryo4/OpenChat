@@ -276,7 +276,7 @@ struct EmptyStateView: View {
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
                 ))
-            Text("ChatBot")
+            Text("OpenChat")
                 .font(.title.bold())
             Text("发送消息开始对话")
                 .font(.body)

@@ -46,7 +46,7 @@ public class ComplicationController: NSObject, CLKComplicationDataSource {
     
     public func getComplicationDescriptors(handler: @escaping ([CLKComplicationDescriptor]) -> Void) {
         let descriptors = [
-            CLKComplicationDescriptor(identifier: "complication", displayName: "ChatBot", supportedFamilies: [
+            CLKComplicationDescriptor(identifier: "complication", displayName: "OpenChat", supportedFamilies: [
                 .circularSmall,
                 .graphicCircular,
                 .graphicCorner,
@@ -71,12 +71,12 @@ public class ComplicationController: NSObject, CLKComplicationDataSource {
     
     public func getCurrentTimelineEntry(for complication: CLKComplication, withHandler handler: @escaping (CLKComplicationTimelineEntry?) -> Void) {
         // 从 UserDefaults 读取最后一条消息
-        var headerText = "ChatBot"
+        var headerText = "OpenChat"
         var bodyText = "No messages"
         
         // 从小体积预备数据中读取，防止解析几十MB JSON 造成 OOM 或 Watchdog 强杀
         if let tinyData = UserDefaults.standard.dictionary(forKey: "widget_tiny_data") as? [String: String] {
-            if let title = tinyData["title"], title != "ChatBot" && title != "新对话" {
+            if let title = tinyData["title"], title != "OpenChat" && title != "新对话" {
                 headerText = title
             }
             if let msg = tinyData["lastMessage"] {
@@ -136,13 +136,13 @@ public class ComplicationController: NSObject, CLKComplicationDataSource {
         switch complication.family {
         case .graphicRectangular:
             template = CLKComplicationTemplateGraphicRectangularStandardBody(
-                headerTextProvider: CLKSimpleTextProvider(text: "ChatBot"),
+                headerTextProvider: CLKSimpleTextProvider(text: "OpenChat"),
                 body1TextProvider: CLKSimpleTextProvider(text: "AI: Hello World"),
                 body2TextProvider: CLKSimpleTextProvider(text: "")
             )
         case .modularLarge:
              template = CLKComplicationTemplateModularLargeStandardBody(
-                 headerTextProvider: CLKSimpleTextProvider(text: "ChatBot"),
+                 headerTextProvider: CLKSimpleTextProvider(text: "OpenChat"),
                  body1TextProvider: CLKSimpleTextProvider(text: "AI: Hello World")
              )
         case .graphicCircular:

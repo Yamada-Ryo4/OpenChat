@@ -359,7 +359,7 @@ class ChatViewModel: ObservableObject {
                 let widgetData: [String: String] = ["title": first.title, "lastMessage": msg]
                 UserDefaults.standard.set(widgetData, forKey: "widget_tiny_data")
             } else {
-                UserDefaults.standard.set(["title": "ChatBot", "lastMessage": "No conversations"], forKey: "widget_tiny_data")
+                UserDefaults.standard.set(["title": "OpenChat", "lastMessage": "No conversations"], forKey: "widget_tiny_data")
             }
 
             // 刷新表盘组件（必须在主线程）
@@ -580,7 +580,7 @@ class ChatViewModel: ObservableObject {
         )
         guard let data = try? JSONEncoder().encode(exportData) else { return nil }
         let dateStr = Date().formatted(date: .numeric, time: .omitted).replacingOccurrences(of: "/", with: "-")
-        return saveToTempFile(data: data, filename: "ChatBot_Config_\(dateStr).json")
+        return saveToTempFile(data: data, filename: "OpenChat_Config_\(dateStr).json")
     }
     
     /// 单独导出记忆（文件URL，无向量）
@@ -588,14 +588,14 @@ class ChatViewModel: ObservableObject {
         let stripped = memories.map { var m = $0; m.embedding = nil; return m }
         guard let data = try? JSONEncoder().encode(stripped) else { return nil }
         let dateStr = Date().formatted(date: .numeric, time: .omitted).replacingOccurrences(of: "/", with: "-")
-        return saveToTempFile(data: data, filename: "ChatBot_Memories_\(dateStr).json")
+        return saveToTempFile(data: data, filename: "OpenChat_Memories_\(dateStr).json")
     }
     
     /// 单独导出聊天记录（文件URL）
     func exportSessionsURL() -> URL? {
         guard let data = try? JSONEncoder().encode(sessions) else { return nil }
         let dateStr = Date().formatted(date: .numeric, time: .omitted).replacingOccurrences(of: "/", with: "-")
-        return saveToTempFile(data: data, filename: "ChatBot_Chats_\(dateStr).json")
+        return saveToTempFile(data: data, filename: "OpenChat_Chats_\(dateStr).json")
     }
     
     // MARK: - 云备份 (v1.10: R2 直传)
@@ -1373,7 +1373,7 @@ class ChatViewModel: ObservableObject {
         // 计算新值
         let result: String
         if selectedGlobalModelID.isEmpty {
-            result = "ChatBot"
+            result = "OpenChat"
         } else {
             let components = selectedGlobalModelID.split(separator: "|")
             if components.count == 2 {
@@ -1385,7 +1385,7 @@ class ChatViewModel: ObservableObject {
                     result = String(components[1])
                 }
             } else {
-                result = "ChatBot"
+                result = "OpenChat"
             }
         }
         

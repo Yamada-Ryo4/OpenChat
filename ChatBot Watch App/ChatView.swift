@@ -380,7 +380,7 @@ struct EmptyStateView: View {
                 .font(.largeTitle)
                 .foregroundStyle(LinearGradient(colors: [.blue, .purple], startPoint: .topLeading, endPoint: .bottomTrailing))
                 .opacity(0.8)
-            Text("ChatBot").font(.headline)
+            Text("OpenChat").font(.headline)
         }.frame(maxWidth: .infinity).padding(.vertical, 30)
     }
 }

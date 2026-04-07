@@ -174,7 +174,7 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         do {
             let data = try JSONSerialization.data(withJSONObject: payload)
             let tempDir = FileManager.default.temporaryDirectory
-            let fileURL = tempDir.appendingPathComponent("ChatBot_FullData_Sync_\(UUID().uuidString).json")
+            let fileURL = tempDir.appendingPathComponent("OpenChat_FullData_Sync_\(UUID().uuidString).json")
             try data.write(to: fileURL)
             session.transferFile(fileURL, metadata: ["type": "FullDataSync", "source": "phone"])
             print("聊天记录+记忆已通过文件推送到 Watch (\(data.count / 1024) KB)")
