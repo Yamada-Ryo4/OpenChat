@@ -28,7 +28,7 @@ class ChatViewModel: ObservableObject {
     @AppStorage("appThemeRaw") var appThemeRaw: String = AppTheme.classic.rawValue  // v1.6: 主题配色
     @AppStorage("preferredColorSchemeRaw") var preferredColorSchemeRaw: String = "dark"  // v2.1: 浅色/深色模式 ("system", "light", "dark")
     @AppStorage("userName") var userName: String = ""  // v2.1: 用户自定义名称
-    @AppStorage("userAvatarData") var userAvatarData: Data? // v2.2: 自定义用户头像
+    @AppStorage("userAvatarData") var userAvatarData: Data = Data() // v2.2: 自定义用户头像（空 Data 表示未设置，与 Watch 端对称）
     @AppStorage("memoryEnabled") var memoryEnabled: Bool = true  // v1.7: 记忆功能开关
     @AppStorage("embeddingProviderID") var embeddingProviderID: String = ""  // v1.7: Embedding 供应商 ID
     @AppStorage("embeddingModelID") var embeddingModelID: String = ""  // v1.7: Embedding 模型 ID
@@ -36,9 +36,9 @@ class ChatViewModel: ObservableObject {
     @AppStorage("detectedEmbeddingDim") var detectedEmbeddingDim: Int = 0  // v1.8: 探测到的向量维度
     @AppStorage("sendTimeToAI") var sendTimeToAI: Bool = true  // 向 AI 传递当前时间
     @AppStorage("sendLocationToAI") var sendLocationToAI: Bool = true  // 向 AI 传递当前位置
-    @AppStorage("workersAIEmbeddingURL") var workersAIEmbeddingURL: String = "https://your-domain.com"  // v1.8: Workers AI 向量端点
-    @AppStorage("cloudBackupURL") var cloudBackupURL: String = "https://your-domain.com/config.json"  // v1.10: 云备份端点
-    @AppStorage("cloudBackupAuthKey") var cloudBackupAuthKey: String = "YOUR_AUTH_KEY"  // v1.10: 云备份认证
+    @AppStorage("workersAIEmbeddingURL") var workersAIEmbeddingURL: String = ""  // v1.8: Workers AI 向量端点
+    @AppStorage("cloudBackupURL") var cloudBackupURL: String = ""  // v1.10: 云备份端点
+    @AppStorage("cloudBackupAuthKey") var cloudBackupAuthKey: String = ""  // v1.10: 云备份认证
     @AppStorage("memoryDeleteConfirm") var memoryDeleteConfirm: Bool = true  // v2.5: 删除记忆需确认
     @AppStorage("memoryMaxRetrievalCount") var memoryMaxRetrievalCount: Int = 5  // v2.5: 最大检索记忆数
     @AppStorage("memoryRetrievalThreshold") var memoryRetrievalThreshold: Double = 0.1  // v2.5: 相似度阈值
@@ -1857,21 +1857,29 @@ class ChatViewModel: ObservableObject {
     }
     
     func deleteMemory(id: UUID) {
-        memories.removeAll { $0.id == id }
-        saveMemories()
-        WatchSessionManager.shared.pushFullDataToWatch() // BUG-1 fix: sync deletion to Watch
+        // v2.5 fix: 软删除（移到回收站），与 Watch 端对称，保证 iOS 回收站有数据
+        if let idx = memories.firstIndex(where: { $0.id == id }) {
+            softDeleteMemory(at: idx)
+        }
     }
     
     func deleteMemories(at offsets: IndexSet) {
-        memories.remove(atOffsets: offsets)
-        saveMemories()
-        WatchSessionManager.shared.pushFullDataToWatch() // BUG-1 fix: sync deletion to Watch
+        // 从大到小排序，避免先删小 index 后大 index 漂移
+        let sortedOffsets = offsets.sorted(by: >)
+        for idx in sortedOffsets {
+            softDeleteMemory(at: idx)
+        }
     }
     
     func clearAllMemories() {
+        let now = Date()
+        var items = memories
+        for i in items.indices { items[i].deletedAt = now }
+        deletedMemoriesBin.insert(contentsOf: items, at: 0)
         memories.removeAll()
         saveMemories()
-        WatchSessionManager.shared.pushFullDataToWatch() // BUG-1 fix: sync deletion to Watch
+        saveDeletedBin()
+        WatchSessionManager.shared.pushFullDataToWatch()
     }
     
     // v2.5: 用辅助模型合并相似记忆

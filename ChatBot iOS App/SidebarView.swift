@@ -10,7 +10,8 @@ struct SidebarView: View {
     @State private var newSessionTitle = ""
 
     var userAvatar: Image {
-        if let data = viewModel.userAvatarData, let uiImg = UIImage(data: data) {
+        let data = viewModel.userAvatarData
+        if !data.isEmpty, let uiImg = UIImage(data: data) {
             return Image(uiImage: uiImg)
         }
         return Image(systemName: "person.crop.circle.fill")

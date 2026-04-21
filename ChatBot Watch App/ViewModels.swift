@@ -1440,6 +1440,9 @@ class ChatViewModel: ObservableObject {
         var firstTokenReceived = false
         var localFirstTokenTime: Date? = nil
         
+        // v2.5 fix: 自动重试计数器（使 autoRetryEnabled 在 Watch 上真正生效）
+        var retryCount = 0
+
         currentTask = Task {
             let history = await buildHistoryWithContext(from: msgs)
 
@@ -1625,9 +1628,93 @@ class ChatViewModel: ObservableObject {
                     }
                     saveSessions()
                     if enableHapticFeedback { WKInterfaceDevice.current().play(.directionDown) }
+                } else if autoRetryEnabled && retryCount < maxRetries {
+                    // v2.5 fix: 自动重试（与 iOS 端行为对齐）
+                    retryCount += 1
+                    try? await Task.sleep(nanoseconds: 1_000_000_000) // 等待 1 秒
+                    if Task.isCancelled { isLoading = false; currentTask = nil; return }
+
+                    // 重试时更新消息气泡提示
+                    if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                        currentMsgs[botIndex].text = "正在重试 (\(retryCount)/\(maxRetries))..."
+                        updateCurrentSessionMessagesInMemory(currentMsgs)
+                    }
+
+                    // 重置流式状态并重新发起请求（注意：此处复用同一 Task，不创建新 Task）
+                    responseText = ""
+                    thinkingText = ""
+                    isThinking = false
+                    pendingBuffer = ""
+                    hasSeenFirstThink = false
+                    responseTextBeforeThink = ""
+                    firstTokenReceived = false
+
+                    let retryStream = service.streamChat(messages: history, modelId: modelID, config: provider, temperature: temperature)
+                    do {
+                        for try await chunk in retryStream {
+                            if Task.isCancelled { break }
+                            pendingBuffer += chunk
+                            let startTag = "<think>"; let endTag = "</think>"
+                            while true {
+                                let currentTag: String? = { if isThinking { return endTag }; if !hasSeenFirstThink { return startTag }; return nil }()
+                                if let target = currentTag, let range = pendingBuffer.range(of: target, options: .caseInsensitive) {
+                                    let textBefore = String(pendingBuffer[..<range.lowerBound])
+                                    if isThinking { thinkingText += textBefore; isThinking = false; hasSeenFirstThink = true; responseTextBeforeThink = responseText; responseText = "" }
+                                    else { responseText += textBefore; isThinking = true }
+                                    pendingBuffer = String(pendingBuffer[range.upperBound...])
+                                } else {
+                                    if let target = currentTag {
+                                        let maxPrefixLen = target.count - 1
+                                        var safeLength = pendingBuffer.count
+                                        if maxPrefixLen > 0 {
+                                            for i in (1...maxPrefixLen).reversed() {
+                                                if pendingBuffer.count >= i {
+                                                    let suffix = String(pendingBuffer.suffix(i))
+                                                    if target.lowercased().hasPrefix(suffix.lowercased()) { safeLength = pendingBuffer.count - i; break }
+                                                }
+                                            }
+                                        }
+                                        if safeLength > 0 { let safe = String(pendingBuffer.prefix(safeLength)); if isThinking { thinkingText += safe } else { responseText += safe }; pendingBuffer = String(pendingBuffer.suffix(from: pendingBuffer.index(pendingBuffer.startIndex, offsetBy: safeLength))) }
+                                    }
+                                    break
+                                }
+                            }
+                            let now = Date()
+                            if now.timeIntervalSince(lastUIUpdateTime) >= uiUpdateInterval {
+                                let finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
+                                streamingText = finalContent
+                                if thinkingMode != .disabled { streamingThinkingText = thinkingText }
+                                lastUIUpdateTime = now; pendingUpdate = false
+                            } else { pendingUpdate = true }
+                        }
+                        if !pendingBuffer.isEmpty { if isThinking { thinkingText += pendingBuffer } else { responseText += pendingBuffer } }
+                        let finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let finalThinking = thinkingText
+                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                            currentMsgs[botIndex].text = finalContent
+                            if thinkingMode == .disabled { currentMsgs[botIndex].thinkingContent = nil } else { currentMsgs[botIndex].thinkingContent = finalThinking.isEmpty ? nil : finalThinking }
+                            currentMsgs[botIndex].completeTime = Date()
+                            if let t = localFirstTokenTime { currentMsgs[botIndex].firstTokenTime = t }
+                            streamingText = ""; streamingThinkingText = ""
+                            updateCurrentSessionMessagesInMemory(currentMsgs)
+                        }
+                        saveSessions()
+                        if enableHapticFeedback { WKInterfaceDevice.current().play(.success) }
+                        if self.memoryEnabled { Task { [weak self] in await self?.extractMemories() } }
+                    } catch {
+                        streamingText = ""; streamingThinkingText = ""
+                        if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
+                            currentMsgs[botIndex].text = "❌ [已重试 \(retryCount) 次] \(error.localizedDescription)"
+                            updateCurrentSessionMessagesInMemory(currentMsgs)
+                            saveSessions()
+                            if enableHapticFeedback { WKInterfaceDevice.current().play(.failure) }
+                        }
+                    }
                 } else if var currentMsgs = sessions.first(where: { $0.id == currentSessionId })?.messages, botIndex < currentMsgs.count {
                     let finalContent = (responseTextBeforeThink + responseText).trimmingCharacters(in: .whitespacesAndNewlines)
-                    if finalContent.isEmpty { currentMsgs[botIndex].text = "❌ \(error.localizedDescription)" }
+                    var errorMsg = "❌ \(error.localizedDescription)"
+                    if retryCount > 0 { errorMsg = "❌ [已重试 \(retryCount) 次] \(error.localizedDescription)" }
+                    if finalContent.isEmpty { currentMsgs[botIndex].text = errorMsg }
                     else { currentMsgs[botIndex].text = finalContent + "\n[中断]" }
                     if thinkingMode != .disabled && !thinkingText.isEmpty {
                         currentMsgs[botIndex].thinkingContent = thinkingText
@@ -1844,15 +1931,20 @@ class ChatViewModel: ObservableObject {
         saveMemories()
     }
     
+    // v2.5: 软删除（移到回收站），与 iOS 端对称；extractMemories 的自动删除路径会调用此方法
+    func softDeleteMemory(at index: Int) {
+        guard index < memories.count else { return }
+        var item = memories.remove(at: index)
+        item.deletedAt = Date()
+        memoryTrash.insert(item, at: 0)
+        saveMemories()
+        saveMemoryTrash()
+        WatchSessionManager.shared.pushFullDataToPhone() // 同步到 iPhone
+    }
+
     func deleteMemory(id: UUID) {
         if let idx = memories.firstIndex(where: { $0.id == id }) {
-            var item = memories[idx]
-            item.deletedAt = Date()
-            memoryTrash.insert(item, at: 0)
-            memories.remove(at: idx)
-            saveMemories()
-            saveMemoryTrash()
-            WatchSessionManager.shared.pushFullDataToPhone() // 同步到 iPhone
+            softDeleteMemory(at: idx)
         }
     }
     
@@ -2030,16 +2122,25 @@ class ChatViewModel: ObservableObject {
         
         let embProvider = getEmbeddingProvider()
         
-        // v1.8: 解析双轨前缀
-        let lines = trimmed.components(separatedBy: "\n")
+        // v1.8: 解析双轨前缀（包含 v2.5 新增的 [删除] 路径，与 iOS 端对称）
+        let allLines = trimmed.components(separatedBy: "\n")
+        let lines = Array(allLines.prefix(20))
+        let maxDeletionsPerExtraction = 3  // 安全阀：每次提取最多删除 3 条
+        var deletionCount = 0
+
         for line in lines {
             var cleaned = line.trimmingCharacters(in: .whitespacesAndNewlines)
             var memType: MemoryType = .longTerm
             var memExpiration: Date? = nil
             var isHighPriority = false
-            
-            // 解析前缀
-            if cleaned.hasPrefix("[!] ") || cleaned.hasPrefix("- [!] ") {
+            var isDelete = false
+
+            // 解析前缀（优先匹配 [删除]）
+            if cleaned.hasPrefix("[删除]") || cleaned.hasPrefix("- [删除]") {
+                cleaned = cleaned.replacingOccurrences(of: "[删除]", with: "")
+                cleaned = cleaned.hasPrefix("- ") ? String(cleaned.dropFirst(2)) : cleaned
+                isDelete = true
+            } else if cleaned.hasPrefix("[!] ") || cleaned.hasPrefix("- [!] ") {
                 cleaned = cleaned.replacingOccurrences(of: "[!] ", with: "")
                 cleaned = cleaned.hasPrefix("- ") ? String(cleaned.dropFirst(2)) : cleaned
                 isHighPriority = true
@@ -2060,7 +2161,28 @@ class ChatViewModel: ObservableObject {
             }
             cleaned = cleaned.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !cleaned.isEmpty, cleaned.count > 2 else { continue }
-            
+
+            // v2.5: [删除] 路径 — 文本包含匹配（Watch 上无需 Embedding 也能删除）
+            if isDelete {
+                guard deletionCount < maxDeletionsPerExtraction else {
+                    print("⚠️ 已达最大删除数 \(maxDeletionsPerExtraction)，跳过: \(cleaned.prefix(30))")
+                    continue
+                }
+                let lowered = cleaned.lowercased()
+                await MainActor.run {
+                    if let idx = self.memories.firstIndex(where: {
+                        $0.content.lowercased().contains(lowered) || lowered.contains($0.content.lowercased())
+                    }) {
+                        self.softDeleteMemory(at: idx)
+                        print("🗑️ Watch 自动删除记忆: \(self.memoryTrash.first?.content ?? cleaned)")
+                    } else {
+                        print("⚠️ 删除失败：找不到与 '\(cleaned.prefix(30))' 匹配的记忆")
+                    }
+                }
+                deletionCount += 1
+                continue
+            }
+
             // 生成向量嵌入
             var emb: [Float]? = nil
             if let (embConfig, embModel) = embProvider {
@@ -2070,12 +2192,19 @@ class ChatViewModel: ObservableObject {
                     print("⚠️ Embedding 生成失败: \(error.localizedDescription)")
                 }
             }
-            
+
             await MainActor.run {
                 addMemory(cleaned, embedding: emb, importance: isHighPriority ? 0.9 : 0.5, type: memType, expiration: memExpiration)
             }
         }
-        
+
+        // 提取完成后推送到 iPhone
+        await MainActor.run {
+            if !WatchSessionManager.shared.isSyncingFromRemote {
+                WatchSessionManager.shared.pushFullDataToPhone()
+            }
+        }
+
         print("✅ 记忆提取完成，当前共 \(memories.count) 条记忆")
     }
     

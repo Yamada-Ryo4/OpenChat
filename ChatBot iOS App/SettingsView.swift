@@ -183,7 +183,7 @@ struct AppearanceSettingsView: View {
                     Text("用户头像")
                     Spacer()
                     PhotosPicker(selection: $selectedAvatarItem, matching: .images, photoLibrary: .shared()) {
-                        if let data = viewModel.userAvatarData, let uiImage = UIImage(data: data) {
+                        if !viewModel.userAvatarData.isEmpty, let uiImage = UIImage(data: viewModel.userAvatarData) {
                             Image(uiImage: uiImage)
                                 .resizable().scaledToFill()
                                 .frame(width: 40, height: 40).clipShape(Circle())
@@ -196,16 +196,17 @@ struct AppearanceSettingsView: View {
                         Task {
                             if let data = try? await newItem?.loadTransferable(type: Data.self) {
                                 if let downsampled = data.downsampled(to: 150) {
-                                    await MainActor.run { viewModel.userAvatarData = downsampled.jpegData(compressionQuality: 0.8) }
+                                    // jpegData 返回 Optional，用 nil-coalescing 回退到原始 data
+                                    await MainActor.run { viewModel.userAvatarData = downsampled.jpegData(compressionQuality: 0.8) ?? data }
                                 } else {
                                     await MainActor.run { viewModel.userAvatarData = data }
                                 }
                             }
                         }
                     }
-                    if viewModel.userAvatarData != nil {
+                    if !viewModel.userAvatarData.isEmpty {
                         Button(role: .destructive) {
-                            withAnimation { viewModel.userAvatarData = nil; selectedAvatarItem = nil }
+                            withAnimation { viewModel.userAvatarData = Data(); selectedAvatarItem = nil }
                         } label: { Image(systemName: "trash") }
                         .buttonStyle(BorderlessButtonStyle())
                     }

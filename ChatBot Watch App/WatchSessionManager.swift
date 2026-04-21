@@ -306,8 +306,17 @@ class WatchSessionManager: NSObject, ObservableObject, WCSessionDelegate {
         }
         
         // String 类型 — 忽略占位符
+        // "设备本地偏好"字段：Watch 与 iPhone 各自独立管理，
+        // 只在 Watch 本地尚未设置时才接受 iPhone 推来的初始值，
+        // 已有本地值时保持不变，避免重启后被 iPhone 的选择覆盖。
+        let deviceLocalKeys: Set<String> = ["selectedGlobalModelID", "helperGlobalModelID"]
         for key in Self.stringKeys {
             if let value = context[key] as? String, !Self.placeholderValues.contains(value) {
+                if deviceLocalKeys.contains(key) {
+                    // 仅当 Watch 本地为空时才接受（首次设置 / 出厂重置场景）
+                    let localValue = defaults.string(forKey: key) ?? ""
+                    if !localValue.isEmpty { continue }
+                }
                 defaults.set(value, forKey: key)
                 updatedKeys.append(key)
             }
