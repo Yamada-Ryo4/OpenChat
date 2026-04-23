@@ -53,6 +53,9 @@ class ChatViewModel: ObservableObject {
     
     @AppStorage("autoRetryEnabled") var autoRetryEnabled: Bool = false
     @AppStorage("maxRetries") var maxRetries: Int = 3
+    // v2.6: 全局最近使用模型历史（按时间倒序排列，最多保留 3 条）
+    // 格式: JSON 数组 [{"providerID": "...", "modelID": "..."}]
+    @AppStorage("recentModelHistory_v1") var recentModelHistoryData: String = "[]"
     
     // v2.3: 联网搜索 (Web Search Proxy)
     @AppStorage("webSearchEnabled") var webSearchEnabled: Bool = false
@@ -133,6 +136,8 @@ class ChatViewModel: ObservableObject {
         streamingBlocks = []
         streamingThinkingBlocks = []
     }
+    private var observers: [Any] = []
+    
     init() {
         // v2.1 性能优化：剥离体积庞大的解码逻辑到后台线程，避免占用主线程导致启动卡顿
         
@@ -141,22 +146,22 @@ class ChatViewModel: ObservableObject {
         LocationService.shared.updateLocation()
         
         // 监听云端数据变更
-        NotificationCenter.default.addObserver(forName: .init("CloudDataDidUpdate"), object: nil, queue: .main) { [weak self] _ in
+        observers.append(NotificationCenter.default.addObserver(forName: .init("CloudDataDidUpdate"), object: nil, queue: .main) { [weak self] _ in
             guard let self = self else { return }
             Task { @MainActor in self.loadFromCloud() }
-        }
+        })
         
         // 监听 Watch WatchConnectivity 配置推送
-        NotificationCenter.default.addObserver(forName: WatchSessionManager.configDidUpdateNotification, object: nil, queue: .main) { [weak self] _ in
+        observers.append(NotificationCenter.default.addObserver(forName: WatchSessionManager.configDidUpdateNotification, object: nil, queue: .main) { [weak self] _ in
             guard let self = self else { return }
             Task { @MainActor in self.reloadFromWatchConnectivity() }
-        }
+        })
         
         // 监听 Watch WatchConnectivity 大文件传输（聊天记录+记忆）完成
-        NotificationCenter.default.addObserver(forName: .init("WatchConnectivityDidReceiveFullData"), object: nil, queue: .main) { [weak self] _ in
+        observers.append(NotificationCenter.default.addObserver(forName: .init("WatchConnectivityDidReceiveFullData"), object: nil, queue: .main) { [weak self] _ in
             guard let self = self else { return }
             Task { @MainActor in self.reloadFromWatchConnectivity() }
-        }
+        })
         
         Task { [weak self] in
             await self?.loadAllDataOffMainThread()
@@ -165,6 +170,8 @@ class ChatViewModel: ObservableObject {
     
     // 后台加载大型本地数据
     private func loadAllDataOffMainThread() async {
+        // v2.6: Incognito 模式不需要读磁盔，跳过耐时 I/O
+        if isIncognitoMode { return }
         // 定义最新的预设供应商
         let latestPresets: [ProviderConfig] = [
             ProviderConfig(name: "智谱AI", baseURL: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", isPreset: true, icon: "sparkles"),
@@ -211,7 +218,7 @@ class ChatViewModel: ObservableObject {
                         updated.favoriteModelIds = existing.favoriteModelIds
                         updated.isValidated = existing.isValidated
                         updated.lastUsedModelId = existing.lastUsedModelId
-                        if !existing.apiKey.isEmpty {
+                        if !existing.apiKeys.isEmpty {
                             updated.apiKeys = existing.apiKeys
                             updated.currentKeyIndex = existing.currentKeyIndex
                         }
@@ -223,7 +230,7 @@ class ChatViewModel: ObservableObject {
                 for custom in decoded where !custom.isPreset { merged.append(custom) }
                 for old in decoded where old.isPreset {
                     if !latestPresets.contains(where: { $0.name == old.name }) {
-                        if !old.apiKey.isEmpty || !old.favoriteModelIds.isEmpty {
+                        if !old.apiKeys.isEmpty || !old.favoriteModelIds.isEmpty {
                             var demoted = old
                             demoted.isPreset = false
                             merged.append(demoted)
@@ -287,9 +294,10 @@ class ChatViewModel: ObservableObject {
         self.isDataLoading = false
         
         // 3. 自动验证（后台静默进行）
-        Task {
+        Task { [weak self] in
+            guard let self = self else { return }
             for i in 0..<self.providers.count {
-                if !self.providers[i].apiKey.isEmpty && !self.providers[i].isValidated {
+                if !self.providers[i].apiKeys.isEmpty && !self.providers[i].isValidated {
                     await self.autoValidateProvider(index: i)
                 }
             }
@@ -297,6 +305,9 @@ class ChatViewModel: ObservableObject {
     }
     
     deinit {
+        for observer in observers {
+            NotificationCenter.default.removeObserver(observer)
+        }
         NotificationCenter.default.removeObserver(self)
     }
     
@@ -598,17 +609,38 @@ class ChatViewModel: ObservableObject {
         providers.filter { !$0.availableModels.isEmpty }.map { ($0, $0.availableModels) }
     }
     
-    // 获取最近使用的模型（每个供应商一个）
+    // v2.6: 获取最近使用的模型（最多 3 条，按真实使用时间倒序）
     var recentlyUsedModels: [(id: String, displayName: String, providerName: String)] {
-        var list: [(String, String, String)] = []
-        for provider in providers {
-            guard let lastModelId = provider.lastUsedModelId,
-                  let model = provider.availableModels.first(where: { $0.id == lastModelId }) else { continue }
-            let compositeID = "\(provider.id.uuidString)|\(model.id)"
-            let nameToShow = model.displayName ?? model.id
-            list.append((compositeID, nameToShow, provider.name))
+        guard let data = recentModelHistoryData.data(using: .utf8),
+              let arr = try? JSONDecoder().decode([[String: String]].self, from: data) else { return [] }
+        var result: [(String, String, String)] = []
+        for entry in arr {
+            guard let providerIDStr = entry["providerID"],
+                  let modelID = entry["modelID"],
+                  let providerUUID = UUID(uuidString: providerIDStr),
+                  let provider = providers.first(where: { $0.id == providerUUID }),
+                  let model = provider.availableModels.first(where: { $0.id == modelID }) else { continue }
+            let compositeID = "\(providerIDStr)|\(modelID)"
+            result.append((compositeID, model.displayName ?? model.id, provider.name))
         }
-        return list
+        return result
+    }
+    
+    // v2.6: 记录一次模型使用，插入到历史头部，去重，截断为 3 条
+    func recordRecentModel(providerID: UUID, modelID: String) {
+        var arr: [[String: String]] = []
+        if let data = recentModelHistoryData.data(using: .utf8) {
+            arr = (try? JSONDecoder().decode([[String: String]].self, from: data)) ?? []
+        }
+        // 移除同一条旧记录
+        arr.removeAll { $0["providerID"] == providerID.uuidString && $0["modelID"] == modelID }
+        // 插到头部
+        arr.insert(["providerID": providerID.uuidString, "modelID": modelID], at: 0)
+        // 截断为最多 3 条
+        if arr.count > 3 { arr = Array(arr.prefix(3)) }
+        if let encoded = try? JSONEncoder().encode(arr), let str = String(data: encoded, encoding: .utf8) {
+            recentModelHistoryData = str
+        }
     }
     
     // MARK: - 配置导出/导入 (v1.9: S7 文件优化版)
@@ -681,9 +713,19 @@ class ChatViewModel: ObservableObject {
             return
         }
         
-        // 去除 embedding 向量减小体积
+        // v2.6: 先尝试获取现有云端配置，以保留手表专用字段
+        var existingConfig: ExportableConfig? = nil
+        if let (data, _) = try? await URLSession.shared.data(for: {
+            var req = URLRequest(url: requestURL)
+            req.httpMethod = "GET"
+            if !authKey.isEmpty { req.setValue(authKey, forHTTPHeaderField: "X-Auth-Key") }
+            return req
+        }()) {
+            existingConfig = try? JSONDecoder().decode(ExportableConfig.self, from: data)
+        }
+
         let strippedMemories = memories.map { var m = $0; m.embedding = nil; return m }
-        let exportData = ExportableConfig(
+        var exportData = ExportableConfig(
             providers: providers,
             selectedGlobalModelID: selectedGlobalModelID,
             temperature: temperature,
@@ -702,6 +744,14 @@ class ChatViewModel: ObservableObject {
             cloudBackupAuthKey: cloudBackupAuthKey.isEmpty ? nil : cloudBackupAuthKey,
             memoryEnabled: memoryEnabled
         )
+        
+        // 注入差异化字段
+        exportData.iphoneRecentModelHistory = recentModelHistoryData
+        if let existing = existingConfig {
+            exportData.watchSelectedGlobalModelID = existing.watchSelectedGlobalModelID
+            exportData.watchHelperGlobalModelID = existing.watchHelperGlobalModelID
+            exportData.watchRecentModelHistory = existing.watchRecentModelHistory
+        }
         
         guard let jsonData = try? JSONEncoder().encode(exportData) else {
             await MainActor.run { cloudUploadStatus = "❌ JSON 编码失败" }
@@ -1266,6 +1316,10 @@ class ChatViewModel: ObservableObject {
             self.historyMessageCount = config.historyMessageCount
             self.customSystemPrompt = config.customSystemPrompt
             self.thinkingModeRaw = config.thinkingMode.rawValue
+            // v2.6: 应用手机专属模型历史
+            if let iphoneHistory = config.iphoneRecentModelHistory {
+                self.recentModelHistoryData = iphoneHistory
+            }
         }
         
         // 5. 向量配置 (供应商、模型、URL、维度)
@@ -1352,6 +1406,10 @@ class ChatViewModel: ObservableObject {
             self.modelSettings[key] = value
         }
         saveModelSettings()
+        // v2.6: 应用手机专属模型历史
+        if let iphoneHistory = config.iphoneRecentModelHistory {
+            self.recentModelHistoryData = iphoneHistory
+        }
     }
     
     /// v1.10: 从 URL 下载并导入配置 (R2 方案)
@@ -1387,8 +1445,11 @@ class ChatViewModel: ObservableObject {
            let providerUUID = UUID(uuidString: String(idComponents[0])),
            providers.contains(where: { $0.id == providerUUID }) {
             self.selectedGlobalModelID = importedID
-        } else {
-            print("⚠️ 导入的 selectedGlobalModelID 无效，保留当前设置")
+        }
+        
+        // v2.6: 恢复手机专用历史
+        if let iphoneHistory = config.iphoneRecentModelHistory {
+            self.recentModelHistoryData = iphoneHistory
         }
         
         // 全量覆盖记忆
@@ -1475,8 +1536,9 @@ class ChatViewModel: ObservableObject {
         let provider = providers[providerIndex]
         if provider.apiKey.isEmpty { appendSystemMessage("⚠️ \(provider.name) 未配置 API Key"); return }
         
-        // 记录最近使用的模型
-        providers[providerIndex].lastUsedModelId = modelID
+        // v2.6: 记录最近使用的模型（全局时间倒序列表）
+        recordRecentModel(providerID: providerID, modelID: modelID)
+        providers[providerIndex].lastUsedModelId = modelID  // 兼容旧逻辑
         saveProviders()
         
         if currentSessionId == nil { createNewSession() }

@@ -225,6 +225,12 @@ struct ExportableConfig: Codable {
     var cloudBackupURL: String? = nil         // 云备份地址
     var cloudBackupAuthKey: String? = nil     // 云备份认证密钥
     var memoryEnabled: Bool? = nil            // 记忆功能开关
+    
+    // v2.6: 设备差异化字段（云端同时保存两端状态）
+    var watchSelectedGlobalModelID: String? = nil // 手表当前选中的模型
+    var watchHelperGlobalModelID: String? = nil   // 手表辅助模型
+    var watchRecentModelHistory: String? = nil    // 手表最近模型历史
+    var iphoneRecentModelHistory: String? = nil   // 手机最近模型历史
 }
 
 // MARK: - 模型能力配置 (v1.7)
