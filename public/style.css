@@ -1840,7 +1840,6 @@ select.input-field {
   z-index: 3000;
   animation: ctxFadeIn 0.12s ease;
 }
-}
 
 @keyframes ctxFadeIn {
   from {
