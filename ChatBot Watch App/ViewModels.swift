@@ -252,9 +252,10 @@ class ChatViewModel: ObservableObject {
         self.isDataLoading = false
         
         // 3. 自动验证（后台静默进行）
-        Task {
+        Task { [weak self] in
+            guard let self = self else { return }
             for i in 0..<self.providers.count {
-                if !self.providers[i].apiKey.isEmpty && !self.providers[i].isValidated {
+                if !self.providers[i].apiKeys.isEmpty && !self.providers[i].isValidated {
                     await self.autoValidateProvider(index: i)
                 }
             }
@@ -377,6 +378,29 @@ class ChatViewModel: ObservableObject {
                 }
             }
         }
+    }
+    
+    /// v2.6: watchOS 进入后台前在主线程同步写硬盘，防止 watchdog 在后台 Task 完成前 kill App
+    func flushToDisk() {
+        // 同步持久化当前会话 ID
+        if let id = currentSessionId {
+            UserDefaults.standard.set(id.uuidString, forKey: "currentSessionId_v1")
+        }
+        // watchOS 进入后台只有约 200ms，限制最近 20 条会话防止主线程阻塞超时
+        let recentSessions = Array(sessions.prefix(20))
+        if let encoded = try? JSONEncoder().encode(recentSessions) {
+            UserDefaults.standard.set(encoded, forKey: "chatSessions_v1")
+        }
+        // 同步持久化记忆（记忆体积通常不大）
+        if let encoded = try? JSONEncoder().encode(memories) {
+            UserDefaults.standard.set(encoded, forKey: "userMemories_v1")
+        }
+        // 同步持久化供应商（已经是 @AppStorage 自动写，这里只是保险）
+        if let encoded = try? JSONEncoder().encode(providers) {
+            UserDefaults.standard.set(encoded, forKey: "savedProviders_v3")
+        }
+        UserDefaults.standard.synchronize()
+        print("💾 [Watch] flushToDisk 完成 (sessions: \(recentSessions.count))")
     }
     
     var currentMessages: [ChatMessage] {
@@ -645,9 +669,12 @@ class ChatViewModel: ObservableObject {
         }
 
         let strippedMemories = memories.map { var m = $0; m.embedding = nil; return m }
+        // v2.6: Watch 上传云端时，共享字段优先保留现有云端内容，防止覆盖 iPhone 的设置
+        let sharedModelID = existingConfig?.selectedGlobalModelID ?? selectedGlobalModelID
+        let sharedHelperID = existingConfig?.helperGlobalModelID ?? helperGlobalModelID
         var exportData = ExportableConfig(
             providers: providers,
-            selectedGlobalModelID: existingConfig?.selectedGlobalModelID ?? selectedGlobalModelID,
+            selectedGlobalModelID: sharedModelID,
             temperature: temperature,
             historyMessageCount: historyMessageCount,
             customSystemPrompt: customSystemPrompt,
@@ -655,7 +682,7 @@ class ChatViewModel: ObservableObject {
             modelSettings: modelSettings,
             memories: strippedMemories,
             sessions: sessions,
-            helperGlobalModelID: existingConfig?.helperGlobalModelID ?? helperGlobalModelID,
+            helperGlobalModelID: sharedHelperID,
             embeddingDimension: detectedEmbeddingDim > 0 ? detectedEmbeddingDim : nil,
             embeddingProviderID: embeddingProviderID.isEmpty ? nil : embeddingProviderID,
             embeddingModelID: embeddingModelID.isEmpty ? nil : embeddingModelID,

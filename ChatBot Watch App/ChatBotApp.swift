@@ -28,10 +28,13 @@ struct ChatBotApp: App {
                         }
                     }
                 }
-                .onChange(of: scenePhase) { newPhase in
+                .onChange(of: scenePhase) { _, newPhase in
                     if newPhase == .active {
                         // App 启动或从后台进入前台时尝试自动备份
                         viewModel.performAutoBackupIfNeeded()
+                    } else if newPhase == .background {
+                        // v2.6: watchOS watchdog 极激进，在 App 被 kill 之前同步写入磁盘
+                        viewModel.flushToDisk()
                     }
                 }
         }

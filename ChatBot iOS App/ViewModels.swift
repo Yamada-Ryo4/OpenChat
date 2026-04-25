@@ -170,8 +170,11 @@ class ChatViewModel: ObservableObject {
     
     // 后台加载大型本地数据
     private func loadAllDataOffMainThread() async {
-        // v2.6: Incognito 模式不需要读磁盔，跳过耐时 I/O
-        if isIncognitoMode { return }
+        // v2.6: Incognito 模式不需要读磁盘 I/O，直接标记加载完成
+        if isIncognitoMode {
+            self.isDataLoading = false
+            return
+        }
         // 定义最新的预设供应商
         let latestPresets: [ProviderConfig] = [
             ProviderConfig(name: "智谱AI", baseURL: "https://open.bigmodel.cn/api/paas/v4", apiKey: "", isPreset: true, icon: "sparkles"),
